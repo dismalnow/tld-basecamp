@@ -1,7 +1,8 @@
 # SaveExtractor
 
-Python tools that read The Long Dark survival saves (game v2.44 and later). They only
-read: no save file is ever written. Standard library only, Python 3.9 or newer.
+Python tools for The Long Dark survival saves (game v2.44 and later). No tool here changes
+a save file: the readers only read, and the editor writes its result to a new file.
+Standard library only, Python 3.9 or newer.
 
 | File | What it does |
 |---|---|
@@ -10,6 +11,8 @@ read: no save file is ever written. Standard library only, Python 3.9 or newer.
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
+| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file. For now: the count of an inventory stack |
+| `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 
 The wiki helper lives in `..\tld_mediawiki_api\tld_wiki_updater.py`.
 
@@ -84,6 +87,57 @@ A document that cannot be written back identically is refused. Nothing is change
 Checked on 2026-11-20: 15 of 15 real saves rebuild byte for byte. They span game
 changelists 157357 to 189457 (v2.60).
 
+## Change the count of a stack
+
+`tld_save_edit.py` changes one value in a save and writes the result to a new file. The
+save you name is only read. For now it does one thing: it sets the count of a stack in the
+player's inventory.
+
+```powershell
+$save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox15"
+python tld_save_edit.py stacks $save
+python tld_save_edit.py set-count $save --item GEAR_WoodMatches --count 40 --out "$env:TEMP\sandbox15.edited"
+```
+
+`stacks` lists every stack with its entry number, item name, count and condition. When the
+inventory holds more than one stack of an item, add `--entry` with the number from that list.
+
+```text
+Save:     sandbox15, 511,102 bytes, passes the exact rebuild check
+Item:     GEAR_WoodMatches, inventory entry 3
+Change:   count 23 -> 40
+Checked:  the edited save differs from the original in exactly this one value
+Checked:  6 of 7 entries are byte for byte unchanged (all except global)
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 511,094 bytes
+SHA-256:  dd9ac33a4768c7e57526981128d245876b97c279078c0b0f4be79f1f3aacb31d
+sandbox15 itself was not changed.
+```
+
+Three checks stand between an edit and a written file. If one fails, nothing is left on disk.
+
+1. The original must pass `tld_save_codec.py verify`.
+2. The edited save, decoded again, must differ from the original in exactly the value asked
+   for, and every other entry must be byte for byte unchanged.
+3. The new file is read back and compared with what was meant to be written.
+
+The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
+`challenge3` and so on). The tool never overwrites anything. Putting the new file in place
+of the original is a separate step that you do yourself, with the game closed and after a
+backup.
+
+Exit code 0 means done, 1 means refused with the reason printed, and 2 means the save was
+not found or an option was wrong.
+
+Two things to know about this edit:
+
+- An item's stored weight does not change with its count (checked across 476 stacks in 16
+  saves), so nothing else in the item record needs updating.
+- The C# editor sets the save's "cheats used" flag whenever it saves. This tool does not.
+  It changes only the value you ask for.
+
+Checked on 2026-11-21: one count changed in each of 16 real saves, and the C# editor's own
+loader read every result back with exactly that one difference.
+
 ## Keep the item table current
 
 Run this after a game update or after adding an item mod. It exits with 0 when every
@@ -127,6 +181,9 @@ saves as well, point `TLD_SAVE_DIR` at their folder first:
 $env:TLD_SAVE_DIR = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival"
 python -m unittest -v
 ```
+
+With `TLD_SAVE_DIR` set, the edit tests also change one count in each real save. That
+happens in memory only: no file is written. Allow a minute or two for the whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.
