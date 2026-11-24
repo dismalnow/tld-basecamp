@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, or the condition of an inventory item |
+| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, the condition of an inventory item, or the liquid an inventory item holds |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -107,11 +107,17 @@ A document that cannot be written back identically is refused. Nothing is change
 Checked on 2026-11-20: 15 of 15 real saves rebuild byte for byte. They span game
 changelists 157357 to 189457 (v2.60).
 
-## Change a count or a condition
+## Change a count, a condition or an amount of liquid
 
 `tld_save_edit.py` changes one value in a save and writes the result to a new file. The
-save you name is only read. It can set the count of a stack in the player's inventory, or
-the condition of an item in the player's inventory.
+save you name is only read. It can set the count of a stack in the player's inventory, the
+condition of an item in the player's inventory, or the liquid such an item holds.
+
+| Command | Tested in the game |
+|---|---|
+| `set-count` | Yes, on game v2.60 |
+| `set-condition` | Yes, on game v2.60 |
+| `set-liters` | Not yet. Its own output says so |
 
 ### Count
 
@@ -159,6 +165,45 @@ sandbox15 itself was not changed.
 ```
 
 A ruined item (condition 0) is refused: the game keeps more than the condition for it.
+
+### Liters
+
+Not tested in the game yet: nobody has loaded a save changed by `set-liters`. Try it on a
+save you can afford to lose.
+
+```powershell
+python tld_save_edit.py liquids $save
+python tld_save_edit.py set-liters $save --item GEAR_WaterSupplyPotable --liters 2.5 --out "$env:TEMP\sandbox15.edited"
+```
+
+`liquids` lists the inventory items that hold liquid: the water you carry, bottles and
+cans, and the fuel in a lamp. An amount shown as `not set` is one the game has not filled
+in yet. The amount is in liters, from 0 to 999, with up to nine decimal places. When the
+inventory holds more than one of an item, add `--entry` with the number from that list.
+
+```text
+entry  item                     liters
+    1  GEAR_WaterSupplyPotable  2
+  180  GEAR_LampFuel            0.11630746
+2 items that hold liquid among 443 inventory items in sandbox15.
+```
+
+```text
+Save:     sandbox15, 585,798 bytes, passes the exact rebuild check
+Item:     GEAR_WaterSupplyPotable, inventory entry 1
+Change:   liters 2 -> 2.5 (stored as 2000000000 -> 2500000000)
+Checked:  the edited save differs from the original in exactly this one value
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by set-liters has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,789 bytes
+SHA-256:  7d13c4ced67c16f50fe5169e170cd7b7b4c7226058954afacabd8c5f9bb433f5
+sandbox15 itself was not changed.
+```
+
+What the tool does not know: how much an item can hold. It will write 5 liters into a
+half-liter bottle, and what the game makes of that is untested. An item whose record holds
+no amount at all, such as unsafe water when you carry none, is refused, because setting it
+would add a field and not change a value.
 
 ### The checks
 

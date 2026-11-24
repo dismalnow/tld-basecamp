@@ -5,13 +5,19 @@ tld_save_edit.py: change one value in a The Long Dark save and write the result 
 Usage:
     python tld_save_edit.py items SAVE
     python tld_save_edit.py stacks SAVE
+    python tld_save_edit.py liquids SAVE
     python tld_save_edit.py set-count SAVE --item GEAR_NAME --count N --out NEW_FILE [--entry N]
     python tld_save_edit.py set-condition SAVE --item GEAR_NAME --condition PERCENT --out NEW_FILE [--entry N]
+    python tld_save_edit.py set-liters SAVE --item GEAR_NAME --liters LITERS --out NEW_FILE [--entry N]
 
 items lists everything in the player's inventory: entry number, item, count, condition.
-stacks lists only the stacks. set-count changes the count of one stack. set-condition
-changes the condition of one item, or of one whole stack. Add --entry when the inventory
-holds more than one of that item.
+stacks lists only the stacks, and liquids only the items that hold liquid. set-count
+changes the count of one stack. set-condition changes the condition of one item, or of
+one whole stack. set-liters changes the liquid one item holds: the water you carry, a
+bottle or can, or the fuel in a lamp. Add --entry when the inventory holds more than one
+of that item.
+
+set-liters has not been tested in the game yet. Its own output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -39,7 +45,7 @@ import re
 import struct
 import sys
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
@@ -49,6 +55,10 @@ from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
 MAX_COUNT = 9999
 MIN_CONDITION = 1.0      # percent
 MAX_CONDITION = 100.0    # percent
+MAX_LITERS = 999         # far above anything the game holds. The limit only catches a slip of the hand
+
+# Kinds of edit that no one has loaded in the game yet. Their output says so.
+NOT_TESTED_IN_GAME = frozenset({"set-liters"})
 
 Difference = Tuple[str, str, str]
 
@@ -149,6 +159,78 @@ def list_stacks(save: DecodedSave) -> List[Stack]:
     return stacks
 
 
+# The game stores an amount of liquid as a whole number of billionths of a liter.
+_BILLION = 1_000_000_000
+
+# Where an inventory item keeps the liquid it holds: (the record, the amount in that record).
+_LIQUID_FIELDS = (
+    ("m_WaterSupplySerialized", "m_VolumeProxy"),                   # the water you carry
+    ("m_LiquidItemSerialized", "m_LiquidLitersProxy"),              # bottles, cans and jerry cans
+    ("m_KeroseneLampItemSerialized", "m_CurrentFuelLitersProxy"),   # the fuel in a lamp
+)
+
+
+@dataclass(frozen=True)
+class Liquid:
+    entry: int                    # position in the save's inventory list, starting at 0
+    prefab: str
+    liters: Optional[Decimal]     # None when the game has not set an amount: it stores a negative number then
+
+
+@dataclass(frozen=True)
+class _LiquidRecord:
+    content: Dict[str, JsonValue]    # the record that holds the amount
+    record_field: str
+    amount_field: str
+    literal: str                     # the amount as stored
+    stored: Decimal                  # the same, as a number: billionths of a liter
+
+
+def _liquid_of(item: JsonValue) -> Optional[_LiquidRecord]:
+    """Where an inventory entry keeps its liquid, and how much the save says it holds.
+
+    None when the entry has no such record, the record has no amount, or the amount is not
+    a number.
+    """
+    gear = _gear_of(item)
+    for record_field, amount_field in _LIQUID_FIELDS:
+        record = gear.get(record_field) if gear is not None else None
+        content = record.value if isinstance(record, NestedJson) else None
+        amount = content.get(amount_field) if isinstance(content, dict) else None
+        if not isinstance(content, dict) or not isinstance(amount, Number):
+            continue
+        try:
+            stored = Decimal(amount.literal)
+        except InvalidOperation:
+            continue
+        if stored.is_finite():
+            return _LiquidRecord(content, record_field, amount_field, amount.literal, stored)
+    return None
+
+
+def _liters_of(stored: Decimal) -> Optional[Decimal]:
+    """Liters for a stored amount, or None for the negative number that means "not set"."""
+    return None if stored < 0 else stored / _BILLION
+
+
+def _liters_text(liters: Optional[Decimal]) -> str:
+    if liters is None:
+        return "not set"
+    return format(liters.normalize(), "f") if liters else "0"
+
+
+def list_liquids(save: DecodedSave) -> List[Liquid]:
+    """Every inventory entry that holds liquid, in save order."""
+    liquids: List[Liquid] = []
+    for entry, item in enumerate(_inventory_items(save)):
+        found = _liquid_of(item)
+        prefab = _prefab_of(item)
+        if found is None or prefab is None:
+            continue
+        liquids.append(Liquid(entry, prefab, _liters_of(found.stored)))
+    return liquids
+
+
 def _item_at(items: List[JsonValue], prefab: str, entry: int, listing: str) -> JsonValue:
     """The inventory entry with this number, once it is confirmed to be the named item."""
     if not 0 <= entry < len(items):
@@ -215,6 +297,36 @@ def _select_item(items: List[JsonValue], prefab: str, entry: Optional[int]) -> T
         raise EditError(f"the inventory holds {len(positions)} entries of {prefab}: {listing}{more}. "
                         "Add --entry to say which one")
     return positions[0], items[positions[0]]
+
+
+def _select_liquid(items: List[JsonValue], prefab: str, entry: Optional[int]) -> Tuple[int, _LiquidRecord]:
+    """The one entry that holds liquid and is meant, with its entry number.
+
+    Raises EditError unless exactly one such entry is meant.
+    """
+    nothing_to_set = "the save holds no amount of liquid for it, so there are no liters to set"
+    if entry is not None:
+        found = _liquid_of(_item_at(items, prefab, entry, "liquids"))
+        if found is None:
+            raise EditError(f"inventory entry {entry} is {prefab}, and {nothing_to_set}")
+        return entry, found
+    names = [_prefab_of(item) for item in items]
+    if prefab not in names:
+        raise _no_such_item(prefab, [name for name, item in zip(names, items) if _liquid_of(item) is not None],
+                            "liquids")
+    liquids: List[Tuple[int, _LiquidRecord]] = []
+    for position, item in enumerate(items):
+        found = _liquid_of(item) if names[position] == prefab else None
+        if found is not None:
+            liquids.append((position, found))
+    if not liquids:
+        raise EditError(f"{prefab} is in the inventory, but {nothing_to_set}")
+    if len(liquids) > 1:
+        listing = ", ".join(f"entry {position} ({_liters_text(_liters_of(found.stored))})"
+                            for position, found in liquids)
+        raise EditError(f"the inventory holds {len(liquids)} entries of {prefab} with liquid: {listing}. "
+                        "Add --entry to say which one")
+    return liquids[0]
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +429,10 @@ def _condition_path(entry: int) -> str:
     return _gear_path(entry, "m_NormalizedCondition")
 
 
+def _liquid_path(entry: int, liquid: _LiquidRecord) -> str:
+    return _gear_path(entry, f"{liquid.record_field} > {liquid.amount_field}")
+
+
 def _prove_single_change(original: bytes, edited: bytes, expected: Difference) -> Tuple[int, int]:
     """Decode both saves afresh and confirm that they differ in exactly the expected value.
 
@@ -414,6 +530,52 @@ def set_item_condition(original: bytes, prefab: str, percent: float,
     return ConditionEdit(edited, prefab, chosen, old, new, entries, unchanged)
 
 
+@dataclass(frozen=True)
+class LitersEdit:
+    data: bytes               # the edited save
+    prefab: str
+    entry: int
+    old_liters: Optional[Decimal]    # None when the game had not set an amount
+    new_liters: Decimal
+    old_amount: str           # as stored: billionths of a liter, for example 1904800000
+    new_amount: str
+    entries: int              # entries in the save
+    unchanged_entries: int    # entries that are byte for byte the original
+
+
+def stored_liters(liters: Decimal) -> str:
+    """The stored form of an amount given in liters: a whole number of billionths of a liter."""
+    if not liters.is_finite() or not 0 <= liters <= MAX_LITERS:
+        raise EditError(f"the amount must be a number of liters from 0 to {MAX_LITERS}, not {liters}")
+    billionths = liters * _BILLION
+    if billionths != billionths.to_integral_value():
+        raise EditError(f"the game stores liters to nine decimal places, and {liters} has more")
+    return str(int(billionths))
+
+
+def set_item_liters(original: bytes, prefab: str, liters: Decimal, entry: Optional[int] = None) -> LitersEdit:
+    """Return the save with the liquid one inventory entry holds changed. Reads and writes no file.
+
+    The amount is given in liters. Raises EditError under the same rules as set_stack_count,
+    and when the save holds no amount of liquid for the entry.
+    """
+    new = stored_liters(liters)
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    chosen, liquid = _select_liquid(_inventory_items(save), prefab, entry)
+    if liquid.stored == Decimal(new):
+        raise EditError(f"inventory entry {chosen} ({prefab}) already holds {_liters_text(liters)} liters. "
+                        "Nothing to change")
+    liquid.content[liquid.amount_field] = Number(new)
+    edited = codec.encode_save(save)
+    expected = (_liquid_path(chosen, liquid), liquid.literal, new)
+    entries, unchanged = _prove_single_change(original, edited, expected)
+    return LitersEdit(edited, prefab, chosen, _liters_of(liquid.stored), liters, liquid.literal, new,
+                      entries, unchanged)
+
+
 # ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
@@ -500,22 +662,46 @@ def _run_list(path: Path, stacks_only: bool) -> int:
     return 0
 
 
+def _run_liquids(path: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        save = codec.decode_save(data)
+        listed = list_liquids(save)
+        total = len(_inventory_items(save))
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        return 1
+    width = max([len(row.prefab) for row in listed] + [4])
+    print(f"{'entry':>5}  {'item':<{width}}  liters")
+    for row in listed:
+        print(f"{row.entry:>5}  {row.prefab:<{width}}  {_liters_text(row.liters)}")
+    print(f"{len(listed)} items that hold liquid among {total} inventory items in {path.name}.")
+    return 0
+
+
 def _percent(stored: str) -> str:
     return f"{float(stored) * 100:.1f}%"
 
 
-def _run_edit(path: Path, out: Path, command: str, prefab: str, value: float, entry: Optional[int]) -> int:
+def _run_edit(path: Path, out: Path, command: str, prefab: str, value: Union[float, Decimal],
+              entry: Optional[int]) -> int:
     data = _read_save(path)
     if data is None:
         return 2
-    edit: Union[CountEdit, ConditionEdit]
+    edit: Union[CountEdit, ConditionEdit, LitersEdit]
     try:
         check_new_file_path(out)
         if command == "set-count":
             edit = set_stack_count(data, prefab, int(value), entry)
             change = f"count {edit.old_count} -> {edit.new_count}"
+        elif command == "set-liters":
+            edit = set_item_liters(data, prefab, Decimal(value), entry)
+            change = (f"liters {_liters_text(edit.old_liters)} -> {_liters_text(edit.new_liters)} "
+                      f"(stored as {edit.old_amount} -> {edit.new_amount})")
         else:
-            edit = set_item_condition(data, prefab, value, entry)
+            edit = set_item_condition(data, prefab, float(value), entry)
             change = (f"condition {_percent(edit.old_condition)} -> {_percent(edit.new_condition)} "
                       f"(stored as {edit.old_condition} -> {edit.new_condition})")
         write_new_file(out, edit.data)
@@ -529,10 +715,20 @@ def _run_edit(path: Path, out: Path, command: str, prefab: str, value: float, en
     print("Checked:  the edited save differs from the original in exactly this one value")
     print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
           "(all except global)")
+    if command in NOT_TESTED_IN_GAME:
+        print(f"Untested: no save changed by {command} has been loaded in the game yet. Try it on a save "
+              "you can afford to lose")
     print(f"Written:  {out}, {len(edit.data):,} bytes")
     print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
     print(f"{path.name} itself was not changed.")
     return 0
+
+
+def _liters_argument(text: str) -> Decimal:
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of liters") from None
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -544,6 +740,7 @@ Examples:
   python tld_save_edit.py items sandbox15
   python tld_save_edit.py set-count sandbox15 --item GEAR_WoodMatches --count 40 --out sandbox15.edited
   python tld_save_edit.py set-condition sandbox15 --item GEAR_Hatchet --condition 100 --out sandbox15.edited
+  python tld_save_edit.py set-liters sandbox15 --item GEAR_LampFuel --liters 0.5 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -551,7 +748,8 @@ option was wrong.
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     for name, text in (("items", "list everything in the player's inventory"),
-                       ("stacks", "list the stacks in the player's inventory")):
+                       ("stacks", "list the stacks in the player's inventory"),
+                       ("liquids", "list the inventory items that hold liquid")):
         listing = commands.add_parser(name, help=text)
         listing.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
     set_count = commands.add_parser("set-count", help="change the count of one inventory stack")
@@ -579,10 +777,31 @@ option was wrong.
                                     "more than one of the item")
     set_condition.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                                help="the file to create. It must not exist yet")
+    set_liters = commands.add_parser("set-liters", help="change the liquid one inventory item holds "
+                                                        "(not tested in the game yet)")
+    set_liters.add_argument("save", type=Path, metavar="SAVE",
+                            help="the save file to read. It is not changed")
+    set_liters.add_argument("--item", required=True, metavar="GEAR_NAME",
+                            help="the item, as liquids prints it, for example GEAR_WaterSupplyPotable")
+    set_liters.add_argument("--liters", required=True, type=_liters_argument, metavar="LITERS",
+                            help=f"the new amount in liters, from 0 to {MAX_LITERS}")
+    set_liters.add_argument("--entry", type=int, metavar="N",
+                            help="the entry number from liquids. Needed when the inventory holds "
+                                 "more than one of the item")
+    set_liters.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                            help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command in ("items", "stacks"):
         return _run_list(args.save, stacks_only=args.command == "stacks")
-    value = args.count if args.command == "set-count" else args.condition
+    if args.command == "liquids":
+        return _run_liquids(args.save)
+    value: Union[float, Decimal]
+    if args.command == "set-count":
+        value = args.count
+    elif args.command == "set-liters":
+        value = args.liters
+    else:
+        value = args.condition
     return _run_edit(args.save, args.out, args.command, args.item, value, args.entry)
 
 

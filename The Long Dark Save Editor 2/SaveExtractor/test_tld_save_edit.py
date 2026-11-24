@@ -20,6 +20,7 @@ import json
 import os
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 from unittest import mock
@@ -27,7 +28,7 @@ from unittest import mock
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import EditError, Item, Stack
+from tld_save_edit import EditError, Item, Liquid, Stack
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -245,6 +246,204 @@ class SetConditionTests(unittest.TestCase):
         with self.assertRaises(EditError) as caught:
             edit._prove_single_change(original, both, (condition_path(0), "1.0", "0.5"))
         self.assertIn("m_UnitsProxy: 23 -> 24", str(caught.exception))
+
+
+def liquid_item(prefab: str, record_field: Optional[str] = None,
+                record: JsonValue = None) -> Dict[str, JsonValue]:
+    """An inventory item with one record for the liquid it holds, or with none."""
+    made = item(prefab, None, "1.0")
+    if record_field is not None:
+        made["m_SerializedGear"].value[record_field] = record        # type: ignore[union-attr,index]
+    return made
+
+
+def liquids_save() -> bytes:
+    """A save whose inventory holds liquid in every form real saves show, and items that hold none."""
+    fuel = "m_LiquidItemSerialized"
+    items: List[JsonValue] = [
+        # 0: the water you carry
+        liquid_item("GEAR_WaterSupplyPotable", "m_WaterSupplySerialized",
+                    NestedJson({"m_VolumeProxy": Number("1904800000")})),
+        # 1: a record without an amount
+        liquid_item("GEAR_WaterSupplyNotPotable", "m_WaterSupplySerialized", NestedJson({})),
+        # 2 and 3: two bottles of the same kind
+        liquid_item("GEAR_LampFuel", fuel, NestedJson({"m_LiquidLitersProxy": Number("171669576"),
+                                                       "m_LiquidQuality": "NonPotable"})),
+        liquid_item("GEAR_LampFuel", fuel, NestedJson({"m_LiquidLitersProxy": Number("500000000"),
+                                                       "m_LiquidQuality": "NonPotable"})),
+        # 4: a lamp, with its fuel in the form the C# editor writes
+        liquid_item("GEAR_KeroseneLampB", "m_KeroseneLampItemSerialized",
+                    NestedJson({"m_HoursPlayed": Number("1583.43872"),
+                                "m_CurrentFuelLitersProxy": Number("1E+09")})),
+        # 5: an amount the game has not set
+        liquid_item("GEAR_BottleHydrogenPeroxide", fuel,
+                    NestedJson({"m_LiquidLitersProxy": Number("-214748364800000"),
+                                "m_LiquidQuality": "NonPotable"})),
+        # 6: no liquid at all. 7: an empty slot for a record. 8 and 9: amounts that are no number
+        liquid_item("GEAR_Hatchet"),
+        liquid_item("GEAR_JerrycanRusty", fuel, None),
+        liquid_item("GEAR_Thermos", fuel, NestedJson({"m_LiquidLitersProxy": Number("NaN")})),
+        liquid_item("GEAR_RecycledCan", fuel, NestedJson({"m_LiquidLitersProxy": "a lot"})),
+    ]
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": items, "m_QuickSelectInstanceIDs": []}
+    return build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)})
+
+
+def liquid_path(entry: int, fields: str) -> str:
+    return (f"m_Dict > global > m_Inventory_Serialized > m_SerializedItems[{entry}] > m_SerializedGear > "
+            f"{fields}")
+
+
+def amount_in(save_bytes: bytes, entry: int, record_field: str, amount_field: str) -> JsonValue:
+    items = codec.decode_save(save_bytes).entries["global"]["m_Inventory_Serialized"].value["m_SerializedItems"]
+    return items[entry]["m_SerializedGear"].value[record_field].value[amount_field]
+
+
+class LiquidListTests(unittest.TestCase):
+    def test_lists_the_items_that_hold_liquid_in_save_order(self) -> None:
+        self.assertEqual(edit.list_liquids(codec.decode_save(liquids_save())), [
+            Liquid(0, "GEAR_WaterSupplyPotable", Decimal("1.9048")),
+            Liquid(2, "GEAR_LampFuel", Decimal("0.171669576")),
+            Liquid(3, "GEAR_LampFuel", Decimal("0.5")),
+            Liquid(4, "GEAR_KeroseneLampB", Decimal("1")),
+            Liquid(5, "GEAR_BottleHydrogenPeroxide", None),
+        ])
+
+    def test_a_save_without_liquid_gives_an_empty_list(self) -> None:
+        self.assertEqual(edit.list_liquids(codec.decode_save(build_save())), [])
+
+    def test_the_reader_and_the_editor_look_for_liquid_in_the_same_places(self) -> None:
+        import tld_save_reader as reader
+        self.assertEqual(edit._LIQUID_FIELDS, reader._LIQUID_FIELDS)
+
+
+class StoredLitersTests(unittest.TestCase):
+    def test_liters_become_whole_billionths(self) -> None:
+        for liters, stored in (("0", "0"), ("1", "1000000000"), ("2.5", "2500000000"),
+                               ("0.171669576", "171669576"), ("999", "999000000000"), ("1E+2", "100000000000")):
+            with self.subTest(liters=liters):
+                self.assertEqual(edit.stored_liters(Decimal(liters)), stored)
+
+    def test_amounts_the_game_cannot_hold_are_refused(self) -> None:
+        for liters in ("-0.1", "999.000000001", "1000", "0.0000000001", "NaN", "Infinity", "-Infinity"):
+            with self.subTest(liters=liters):
+                with self.assertRaises(EditError):
+                    edit.stored_liters(Decimal(liters))
+
+
+class SetLitersTests(unittest.TestCase):
+    def test_changes_exactly_one_value(self) -> None:
+        original = liquids_save()
+        result = edit.set_item_liters(original, "GEAR_WaterSupplyPotable", Decimal("2.5"))
+        self.assertEqual((result.entry, result.old_amount, result.new_amount), (0, "1904800000", "2500000000"))
+        self.assertEqual((result.old_liters, result.new_liters), (Decimal("1.9048"), Decimal("2.5")))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(liquid_path(0, "m_WaterSupplySerialized > m_VolumeProxy"),
+                                  "1904800000", "2500000000")])
+        self.assertEqual(amount_in(result.data, 0, "m_WaterSupplySerialized", "m_VolumeProxy"),
+                         Number("2500000000"))
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_each_kind_of_liquid_record_can_be_set(self) -> None:
+        for prefab, entry, fields, old in (
+                ("GEAR_LampFuel", 3, "m_LiquidItemSerialized > m_LiquidLitersProxy", "500000000"),
+                ("GEAR_KeroseneLampB", None, "m_KeroseneLampItemSerialized > m_CurrentFuelLitersProxy",
+                 "1E+09")):
+            with self.subTest(prefab=prefab):
+                original = liquids_save()
+                result = edit.set_item_liters(original, prefab, Decimal("0.25"), entry=entry)
+                found = list(edit.differences(codec.decode_save(original).slot,
+                                              codec.decode_save(result.data).slot))
+                self.assertEqual(found, [(liquid_path(result.entry, fields), old, "250000000")])
+
+    def test_an_amount_the_game_had_not_set_can_be_set(self) -> None:
+        result = edit.set_item_liters(liquids_save(), "GEAR_BottleHydrogenPeroxide", Decimal("0.5"))
+        self.assertIsNone(result.old_liters)
+        self.assertEqual((result.old_amount, result.new_amount), ("-214748364800000", "500000000"))
+
+    def test_zero_liters_is_allowed_and_is_not_the_same_as_not_set(self) -> None:
+        result = edit.set_item_liters(liquids_save(), "GEAR_WaterSupplyPotable", Decimal("0"))
+        self.assertEqual(result.new_amount, "0")
+        self.assertEqual(edit.list_liquids(codec.decode_save(result.data))[0],
+                         Liquid(0, "GEAR_WaterSupplyPotable", Decimal("0")))
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = liquids_save()
+        kept = bytes(original)
+        edit.set_item_liters(original, "GEAR_WaterSupplyPotable", Decimal("3"))
+        self.assertEqual(original, kept)
+
+    def test_requests_that_do_not_name_exactly_one_item_with_liquid_are_refused(self) -> None:
+        cases = (
+            ("GEAR_LampFuel", None, "holds 2 entries of GEAR_LampFuel with liquid: entry 2 (0.171669576), "
+                                    "entry 3 (0.5). Add --entry"),
+            ("GEAR_LampFuel", 0, "inventory entry 0 is GEAR_WaterSupplyPotable, not GEAR_LampFuel"),
+            ("GEAR_LampFuel", 40, "there is no inventory entry 40. Entries run from 0 to 9"),
+            ("GEAR_Lampfuel", None, "there is no GEAR_Lampfuel in the inventory. Did you mean GEAR_LampFuel?"),
+            ("GEAR_Rifle", None, "there is no GEAR_Rifle in the inventory. Run liquids to see the item names."),
+            ("GEAR_Hatchet", None, "GEAR_Hatchet is in the inventory, but the save holds no amount of liquid"),
+            ("GEAR_Hatchet", 6, "inventory entry 6 is GEAR_Hatchet, and the save holds no amount of liquid"),
+            ("GEAR_WaterSupplyNotPotable", None, "the save holds no amount of liquid for it"),
+            ("GEAR_JerrycanRusty", None, "the save holds no amount of liquid for it"),
+            ("GEAR_Thermos", None, "the save holds no amount of liquid for it"),
+            ("GEAR_RecycledCan", 9, "the save holds no amount of liquid for it"),
+        )
+        for prefab, entry, message in cases:
+            with self.subTest(prefab=prefab, entry=entry):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_item_liters(liquids_save(), prefab, Decimal("1"), entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_the_amount_it_already_holds_is_refused(self) -> None:
+        for prefab, liters in (("GEAR_WaterSupplyPotable", "1.9048"), ("GEAR_KeroseneLampB", "1")):
+            with self.subTest(prefab=prefab):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_item_liters(liquids_save(), prefab, Decimal(liters))
+                self.assertIn(f"already holds {liters} liters. Nothing to change", str(refused.exception))
+
+    def test_amounts_out_of_range_are_refused_before_the_save_is_read(self) -> None:
+        for liters in ("-1", "1000", "0.0000000001"):
+            with self.subTest(liters=liters):
+                with self.assertRaises(EditError):
+                    edit.set_item_liters(b"not a save", "GEAR_WaterSupplyPotable", Decimal(liters))
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_item_liters(b"not a save", "GEAR_WaterSupplyPotable", Decimal("1"))
+        self.assertIn("does not pass the exact rebuild check", str(refused.exception))
+
+    def test_an_edit_that_writes_the_wrong_value_is_caught(self) -> None:
+        # Fault injection: the encoder hands back a save with 3 liters where 2.5 were asked for.
+        original = liquids_save()
+        wrong = edit.set_item_liters(original, "GEAR_WaterSupplyPotable", Decimal("3")).data
+        real_encode = codec.encode_save
+
+        def encode_wrongly(save: DecodedSave) -> bytes:
+            encoded = real_encode(save)
+            return encoded if encoded in (original, wrong) else wrong
+
+        with mock.patch.object(codec, "encode_save", side_effect=encode_wrongly):
+            with self.assertRaises(EditError) as caught:
+                edit.set_item_liters(original, "GEAR_WaterSupplyPotable", Decimal("2.5"))
+        self.assertIn("did not change exactly the one value asked for", str(caught.exception))
+        self.assertIn("1904800000 -> 3000000000", str(caught.exception))
+
+    def test_an_edit_that_also_changes_another_item_is_caught(self) -> None:
+        # Fault injection: the encoder hands back a save where the lamp fuel changed as well.
+        original = liquids_save()
+        first = edit.set_item_liters(original, "GEAR_WaterSupplyPotable", Decimal("2.5")).data
+        wrong = edit.set_item_liters(first, "GEAR_LampFuel", Decimal("1"), entry=2).data
+        real_encode = codec.encode_save
+
+        def encode_wrongly(save: DecodedSave) -> bytes:
+            encoded = real_encode(save)
+            return wrong if encoded == first else encoded
+
+        with mock.patch.object(codec, "encode_save", side_effect=encode_wrongly):
+            with self.assertRaises(EditError) as caught:
+                edit.set_item_liters(original, "GEAR_WaterSupplyPotable", Decimal("2.5"))
+        self.assertIn("did not change exactly the one value asked for", str(caught.exception))
 
 
 class StackListTests(unittest.TestCase):
@@ -712,9 +911,104 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(out, "")
         self.assertFalse(self.out.exists())
 
+    def test_liquids_lists_the_items_that_hold_liquid(self) -> None:
+        self.save.write_bytes(liquids_save())
+        code, out, err = self.run_command("liquids", str(self.save))
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split(), ["entry", "item", "liters"])
+        self.assertEqual([line.split() for line in lines[1:6]], [
+            ["0", "GEAR_WaterSupplyPotable", "1.9048"],
+            ["2", "GEAR_LampFuel", "0.171669576"],
+            ["3", "GEAR_LampFuel", "0.5"],
+            ["4", "GEAR_KeroseneLampB", "1"],
+            ["5", "GEAR_BottleHydrogenPeroxide", "not", "set"],
+        ])
+        self.assertEqual(lines[6], "5 items that hold liquid among 10 inventory items in sandbox15.")
+        self.assertEqual(err, "")
+
+    def test_liquids_on_a_save_without_liquid(self) -> None:
+        code, out, _ = self.run_command("liquids", str(self.save))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[-1], "0 items that hold liquid among 5 inventory items in sandbox15.")
+
+    def test_set_liters_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(liquids_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("set-liters", str(self.save), "--item", "GEAR_WaterSupplyPotable",
+                                          "--liters", "2.5", "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(amount_in(self.out.read_bytes(), 0, "m_WaterSupplySerialized", "m_VolumeProxy"),
+                         Number("2500000000"))
+        self.assertEqual(self.out.read_bytes(),
+                         edit.set_item_liters(liquids_save(), "GEAR_WaterSupplyPotable", Decimal("2.5")).data)
+        self.assertIn("GEAR_WaterSupplyPotable, inventory entry 0", out)
+        self.assertIn("liters 1.9048 -> 2.5 (stored as 1904800000 -> 2500000000)", out)
+        self.assertIn("differs from the original in exactly this one value", out)
+        self.assertIn("2 of 3 entries are byte for byte unchanged", out)
+        self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_set_liters_says_that_it_is_not_tested_in_the_game(self) -> None:
+        self.save.write_bytes(liquids_save())
+        code, out, _ = self.run_command("set-liters", str(self.save), "--item", "GEAR_BottleHydrogenPeroxide",
+                                        "--liters", "0.5", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("liters not set -> 0.5 (stored as -214748364800000 -> 500000000)", out)
+        self.assertIn("Untested: no save changed by set-liters has been loaded in the game yet", out)
+
+    def test_whole_liters_are_printed_plainly(self) -> None:
+        self.save.write_bytes(liquids_save())
+        code, out, _ = self.run_command("set-liters", str(self.save), "--item", "GEAR_WaterSupplyPotable",
+                                        "--liters", "20", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("liters 1.9048 -> 20 (stored as 1904800000 -> 20000000000)", out)
+
+    def test_edits_tested_in_the_game_do_not_carry_that_line(self) -> None:
+        code, out, _ = self.run_command("set-count", str(self.save), "--item", "GEAR_WoodMatches",
+                                        "--count", "40", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertNotIn("Untested", out)
+        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters"}))
+
+    def test_set_liters_refusals_write_nothing(self) -> None:
+        self.save.write_bytes(liquids_save())
+        water = ["--item", "GEAR_WaterSupplyPotable"]
+        cases = {
+            "several": (["--item", "GEAR_LampFuel", "--liters", "1"], "Add --entry to say which one"),
+            "no liquid": (["--item", "GEAR_Hatchet", "--liters", "1"], "holds no amount of liquid"),
+            "unknown item": (["--item", "GEAR_Nope", "--liters", "1"], "there is no GEAR_Nope in the"),
+            "same amount": (water + ["--liters", "1.9048"], "already holds 1.9048"),
+            "too much": (water + ["--liters", "1000"], "from 0 to 999"),
+            "negative": (water + ["--liters=-1"], "from 0 to 999"),
+            "too fine": (water + ["--liters", "0.0000000001"], "nine decimal places"),
+        }
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                before = self.snapshot()
+                code, out, err = self.run_command("set-liters", str(self.save), *options,
+                                                  "--out", str(self.out))
+                self.assertEqual(code, 1)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+
+    def test_a_liters_value_that_is_not_a_number_is_a_usage_error(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as caught:
+                edit.main(["set-liters", str(self.save), "--item", "GEAR_LampFuel", "--liters", "plenty",
+                           "--out", str(self.out)])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("'plenty' is not a number of liters", err.getvalue())
+        self.assertFalse(self.out.exists())
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--out", str(self.out)],
+                          ["set-liters", str(self.save), "--item", "GEAR_LampFuel", "--out", str(self.out)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--count", "two",
                            "--out", str(self.out)]):
             with self.subTest(" ".join(arguments[:1]) or "no arguments"):
@@ -769,6 +1063,43 @@ class RealSaveTests(unittest.TestCase):
                 expected = [Item(item.entry, item.prefab, item.count, 50.0 if item.entry == target.entry
                                  else item.condition) for item in before]
                 self.assertEqual(after, expected)
+
+    def test_one_amount_of_liquid_can_be_changed_in_every_real_save(self) -> None:
+        """In memory only. No file is written."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        edited = 0
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.list_liquids(codec.decode_save(original))
+                if not before:
+                    continue
+                target = before[0]
+                liters = Decimal("0.125") if target.liters != Decimal("0.125") else Decimal("0.25")
+                result = edit.set_item_liters(original, target.prefab, liters, entry=target.entry)
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                after = edit.list_liquids(codec.decode_save(result.data))
+                expected = [Liquid(liquid.entry, liquid.prefab, liters if liquid.entry == target.entry
+                                   else liquid.liters) for liquid in before]
+                self.assertEqual(after, expected)
+                edited += 1
+        self.assertTrue(edited, "no real save holds an item with liquid")
+
+    def test_every_amount_of_liquid_in_a_real_inventory_can_be_read(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        for path in codec.find_saves(folder):
+            save = codec.decode_save(path.read_bytes())
+            for entry, item in enumerate(edit._inventory_items(save)):
+                gear = item["m_SerializedGear"].value
+                for record_field, amount_field in edit._LIQUID_FIELDS:
+                    record = gear.get(record_field)
+                    if isinstance(record, NestedJson) and isinstance(record.value, dict) \
+                            and amount_field in record.value:
+                        with self.subTest(save=path.name, entry=entry):
+                            self.assertIsNotNone(edit._liquid_of(item))
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])
