@@ -412,6 +412,55 @@ def _count(gear: dict) -> int:
     return int(stack.get("m_UnitsProxy", 1))
 
 
+# The game stores weights and volumes as whole numbers of billionths: of a kilogram, or of a liter.
+_BILLION = 1_000_000_000
+
+# Where an item keeps the liquid it holds: (field that holds the record, field with the amount).
+_LIQUID_FIELDS = (
+    ("m_WaterSupplySerialized", "m_VolumeProxy"),                   # the player's water, potable or not
+    ("m_LiquidItemSerialized", "m_LiquidLitersProxy"),              # bottles, cans and jerry cans
+    ("m_KeroseneLampItemSerialized", "m_CurrentFuelLitersProxy"),   # the fuel in a lamp
+)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _unit_weight_kg(gear: dict) -> Optional[float]:
+    """Weight of one unit in kilograms, as the save stores it. None when no weight is stored.
+
+    It is the weight of a whole unit: the game keeps the same number for a food item that is
+    half eaten. Water, other liquids, powders, papers and keys have no stored weight. The C#
+    editor in this repository writes 0.0 where the game wrote nothing, so zero counts as
+    no stored weight too.
+    """
+    value = gear.get("m_WeightKG")
+    if not _is_number(value) or value <= 0:
+        return None
+    return round(value / _BILLION, 3)
+
+
+def _liters(gear: dict) -> Optional[float]:
+    """Liquid the item holds, in liters. None when it holds none, or the save stores no amount.
+
+    A negative number is the game's mark for an amount it has not set yet.
+    """
+    for holder, field in _LIQUID_FIELDS:
+        record = _json_value(gear.get(holder))
+        value = record.get(field) if isinstance(record, dict) else None
+        if _is_number(value):
+            return round(value / _BILLION, 3) if value >= 0 else None
+    return None
+
+
+def _calories(gear: dict) -> Optional[float]:
+    """Calories left in one unit of a food item. None for an item that is not food."""
+    record = _json_value(gear.get("m_FoodItemSerialized"))
+    value = record.get("m_CaloriesRemainingProxy") if isinstance(record, dict) else None
+    return round(value, 1) if _is_number(value) else None
+
+
 def _position(gear: dict) -> tuple:
     pos = gear.get("m_Position")
     if pos and len(pos) == 3:
@@ -450,6 +499,9 @@ class ItemRecord:
     x: Optional[float]
     y: Optional[float]
     z: Optional[float]
+    unit_weight_kg: Optional[float]   # stored weight of one whole unit, None when the save has none
+    liters: Optional[float]           # liquid the item holds: water, a bottle or can, lamp fuel
+    calories: Optional[float]         # calories left in one unit of food
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +530,9 @@ def _make_record(scene: str, region: str, location: str, location_type: str,
         count=_count(gear),
         condition_pct=_condition(gear),
         x=x, y=y, z=z,
+        unit_weight_kg=_unit_weight_kg(gear),
+        liters=_liters(gear),
+        calories=_calories(gear),
     )
 
 
@@ -608,7 +663,8 @@ def load_save(path: Path) -> list:
 
 HEADERS = ["region", "location", "location_type", "container",
            "category", "subcategory", "item",
-           "count", "condition_pct", "x", "y", "z", "prefab", "source"]
+           "count", "condition_pct", "x", "y", "z", "prefab", "source",
+           "unit_weight_kg", "liters", "calories"]
 
 
 def print_table(records: list) -> None:
@@ -624,6 +680,9 @@ def print_table(records: list) -> None:
             str(r.y) if r.y is not None else "",
             str(r.z) if r.z is not None else "",
             r.prefab, r.source,
+            str(r.unit_weight_kg) if r.unit_weight_kg is not None else "",
+            str(r.liters) if r.liters is not None else "",
+            str(r.calories) if r.calories is not None else "",
         ]
         rows.append(row)
         for h, v in zip(HEADERS, row):
@@ -664,6 +723,9 @@ def write_csv(records: list, path: Path) -> None:
                 r.y if r.y is not None else "",
                 r.z if r.z is not None else "",
                 r.prefab, r.source,
+                r.unit_weight_kg if r.unit_weight_kg is not None else "",
+                r.liters if r.liters is not None else "",
+                r.calories if r.calories is not None else "",
             ])
     print(f"Wrote {len(records)} rows to {path}")
 

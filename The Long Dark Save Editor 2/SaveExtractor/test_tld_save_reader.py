@@ -1,4 +1,5 @@
-r"""Tests for tld_save_reader.py: where it writes its CSV, its region labels, and how it decompresses.
+r"""Tests for tld_save_reader.py: where it writes its CSV, its region labels, how it decompresses,
+and the weight, liters and calories it reads.
 
 Run from this folder:
     python -m unittest -v
@@ -21,8 +22,9 @@ import json
 import os
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest import mock
 
 import tld_save_codec as codec
@@ -64,6 +66,77 @@ def town_save() -> bytes:
     assert isinstance(entries, dict)
     entries["MountainTownRegion"] = scene_with_matches("444", "10", "716")
     entries["PostOfficeA"] = scene_with_matches("1", "2", "3")
+    return codec.encode_save(DecodedSave(slot))
+
+
+# One of each kind of item that stores a weight, a liquid amount or calories:
+# (prefab, the fields the save holds for it, unit_weight_kg, liters, calories).
+# The game writes weights and volumes as whole numbers of billionths of a kilogram or a liter.
+SUPPLIES: List[Tuple[str, Dict[str, JsonValue], Optional[float], Optional[float], Optional[float]]] = [
+    ("GEAR_Stick", {"m_WeightKG": Number("150000000"),
+                    "m_StackableItemSerialized": NestedJson({"m_UnitsProxy": Number("6")})}, 0.15, None, None),
+    ("GEAR_MRE", {"m_WeightKG": Number("500000000"),
+                  "m_FoodItemSerialized": NestedJson({"m_CaloriesRemainingProxy": Number("122.235107"),
+                                                      "m_CaloriesTotal": Number("1750.0")})}, 0.5, None, 122.2),
+    ("GEAR_RawCohoSalmon", {"m_WeightKG": Number("3442150528"),
+                            "m_FoodItemSerialized": NestedJson(
+                                {"m_CaloriesRemainingProxy": Number("1032.64514"),
+                                 "m_CaloriesTotal": Number("1032.64514")})}, 3.442, None, 1032.6),
+    ("GEAR_WaterSupplyPotable", {"m_WaterSupplySerialized": NestedJson(
+        {"m_VolumeProxy": Number("2000000000")})}, None, 2.0, None),
+    ("GEAR_WaterSupplyNotPotable", {"m_WaterSupplySerialized": NestedJson({})}, None, None, None),
+    ("GEAR_KeroseneLampB", {"m_WeightKG": Number("1000000000"),
+                            "m_KeroseneLampItemSerialized": NestedJson(
+                                {"m_CurrentFuelLitersProxy": Number("396388192")})}, 1.0, 0.396, None),
+    ("GEAR_JerrycanRusty", {"m_WeightKG": Number("100000000"),
+                            "m_LiquidItemSerialized": NestedJson(
+                                {"m_LiquidLitersProxy": Number("1147736448"),
+                                 "m_LiquidQuality": "NonPotable"})}, 0.1, 1.148, None),
+    # A bottle whose amount the game has not set yet: it writes a large negative number.
+    ("GEAR_BottleHydrogenPeroxide", {"m_LiquidItemSerialized": NestedJson(
+        {"m_LiquidLitersProxy": Number("-214748364800000"), "m_LiquidQuality": "NonPotable"})},
+     None, None, None),
+    ("GEAR_VisorNoteML3", {}, None, None, None),
+    ("GEAR_Cloth", {"m_WeightKG": Number("100000000"), "m_LiquidItemSerialized": None,
+                    "m_FoodItemSerialized": None}, 0.1, None, None),
+    # As the C# editor in this repository leaves a save: exponent forms, and 0.0 where the game wrote nothing.
+    ("GEAR_Prybar", {"m_WeightKG": Number("1E+09")}, 1.0, None, None),
+    ("GEAR_HeavyBandage", {"m_WeightKG": Number("0.0")}, None, None, None),
+    ("GEAR_KeroseneLamp_Spelunkers", {"m_WeightKG": Number("1E+09"),
+                                      "m_KeroseneLampItemSerialized": NestedJson(
+                                          {"m_CurrentFuelLitersProxy": Number("-2.14748365E+14")})},
+     1.0, None, None),
+]
+
+
+def supplies_save() -> bytes:
+    """A save with the SUPPLIES items in the player's inventory, and two of them in a scene as well."""
+    def stored(prefab: str, fields: Dict[str, JsonValue], key: str) -> Dict[str, JsonValue]:
+        return {"m_PrefabName": prefab, key: NestedJson(dict(fields))}
+
+    carried: List[JsonValue] = [
+        stored(prefab, fields, "m_SerializedGear") for prefab, fields, _, _, _ in SUPPLIES]
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": carried}
+    on_the_floor: Dict[str, JsonValue] = {
+        "m_SerializedItems": [stored(SUPPLIES[1][0], SUPPLIES[1][1], "m_SearializedGear")]}
+    locker: Dict[str, JsonValue] = {
+        "m_PrefabName": "CONTAINER_Locker",
+        "m_SearializedContainer": NestedJson({
+            "m_SerializedItems": [stored(SUPPLIES[6][0], SUPPLIES[6][1], "m_SearializedGear")],
+            "m_GearToInstantiateSerialized": ["GEAR_Stick"],
+        }),
+    }
+    slot: Dict[str, JsonValue] = {
+        "m_InternalName": "sandbox15",
+        "m_Dict": {
+            "boot": {"m_SceneName": "LakeRegion"},
+            "global": {"m_Inventory_Serialized": NestedJson(inventory)},
+            "LakeRegion": {
+                "m_GearManagerSerialized": NestedJson(on_the_floor),
+                "m_ContainerManagerSerialized": NestedJson({"m_SerializedContainers": [locker]}),
+            },
+        },
+    }
     return codec.encode_save(DecodedSave(slot))
 
 
@@ -327,9 +400,110 @@ class DamagedSaveTests(ReaderCase):
         self.assertIn("could not decode scene 'PostOfficeA'", errors.getvalue())
 
 
+class StoredAmountTests(ReaderCase):
+    """unit_weight_kg, liters and calories, as the save stores them."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.save.write_bytes(supplies_save())
+
+    def test_each_kind_of_item_gives_its_amounts(self) -> None:
+        records = [record for record in reader.read_save(self.save).records
+                   if record.location_type == "player_inventory"]
+        found = [(record.prefab, record.unit_weight_kg, record.liters, record.calories) for record in records]
+        self.assertEqual(found, [(prefab, weight, liters, calories)
+                                 for prefab, _, weight, liters, calories in SUPPLIES])
+
+    def test_the_weight_is_for_one_unit_of_a_stack(self) -> None:
+        sticks = reader.read_save(self.save).records[0]
+        self.assertEqual((sticks.prefab, sticks.count, sticks.unit_weight_kg), ("GEAR_Stick", 6, 0.15))
+
+    def test_items_on_the_floor_and_in_containers_carry_them_too(self) -> None:
+        records = {record.location_type: record for record in reader.read_save(self.save).records
+                   if record.location_type in ("floor", "container")}
+        self.assertEqual((records["floor"].prefab, records["floor"].unit_weight_kg, records["floor"].calories),
+                         ("GEAR_MRE", 0.5, 122.2))
+        self.assertEqual((records["container"].prefab, records["container"].unit_weight_kg,
+                          records["container"].liters), ("GEAR_JerrycanRusty", 0.1, 1.148))
+
+    def test_loot_nobody_has_searched_has_no_amounts(self) -> None:
+        waiting = [record for record in reader.read_save(self.save, include_unsearched=True).records
+                   if record.location_type == "container_unsearched"]
+        self.assertEqual([(record.prefab, record.unit_weight_kg, record.liters, record.calories)
+                          for record in waiting], [("GEAR_Stick", None, None, None)])
+
+    def test_the_csv_ends_with_the_three_columns(self) -> None:
+        code, _, _ = self.run_reader(str(self.save), "--csv")
+        self.assertEqual(code, 0)
+        rows = rows_of(self.reports / "sandbox15.csv")
+        self.assertEqual(rows[0], reader.HEADERS)
+        self.assertEqual(rows[0][-3:], ["unit_weight_kg", "liters", "calories"])
+        count = reader.HEADERS.index("count")
+        self.assertEqual((rows[1][count], rows[1][-3:]), ("6", ["0.15", "", ""]))               # the sticks
+        self.assertEqual(rows[2][-3:], ["0.5", "", "122.2"])                                    # the MRE
+        self.assertEqual(rows[4][-3:], ["", "2.0", ""])                                         # the water
+
+    def test_the_columns_that_were_there_keep_their_places(self) -> None:
+        self.assertEqual(reader.HEADERS[:14], [
+            "region", "location", "location_type", "container", "category", "subcategory", "item",
+            "count", "condition_pct", "x", "y", "z", "prefab", "source"])
+
+
 def real_saves() -> Sequence[Path]:
     folder = os.environ.get("TLD_SAVE_DIR")
     return codec.find_saves(Path(folder)) if folder else []
+
+
+Amounts = Tuple[str, Optional[float], Optional[float], Optional[float]]
+
+
+def amounts_from_the_codec(save: Path) -> Iterator[Amounts]:
+    """(prefab, unit_weight_kg, liters, calories) of every item of a save, from the codec's own decoding.
+
+    It walks the inventory, the items on the ground and the items in containers by itself, so it
+    checks both which fields the reader takes and how it reaches them.
+    """
+    def opened(value: JsonValue) -> JsonValue:
+        return value.value if isinstance(value, NestedJson) else value
+
+    def amount(holder: JsonValue, field: str) -> Optional[float]:
+        record = opened(holder)
+        value = record.get(field) if isinstance(record, dict) else None
+        return float(value.literal) if isinstance(value, Number) else None
+
+    def one(item: JsonValue) -> Amounts:
+        assert isinstance(item, dict)
+        gear = opened(item.get("m_SerializedGear") or item.get("m_SearializedGear"))
+        assert isinstance(gear, dict)
+        weight = amount(gear, "m_WeightKG")
+        volumes = [amount(gear.get(holder), field) for holder, field in (
+            ("m_WaterSupplySerialized", "m_VolumeProxy"), ("m_LiquidItemSerialized", "m_LiquidLitersProxy"),
+            ("m_KeroseneLampItemSerialized", "m_CurrentFuelLitersProxy"))]
+        volume = next((value for value in volumes if value is not None), None)
+        left = amount(gear.get("m_FoodItemSerialized"), "m_CaloriesRemainingProxy")
+        return (reader.normalize_prefab(str(item["m_PrefabName"])),
+                round(weight / 1e9, 3) if weight is not None and weight > 0 else None,
+                round(volume / 1e9, 3) if volume is not None and volume >= 0 else None,
+                round(left, 1) if left is not None else None)
+
+    entries = codec.decode_save(save.read_bytes()).entries
+    for name, document in entries.items():
+        if not isinstance(document, dict) or name == "boot":
+            continue
+        if name == "global":
+            listed = opened(document.get("m_Inventory_Serialized"))
+            for item in (listed.get("m_SerializedItems") or []) if isinstance(listed, dict) else []:
+                yield one(item)
+            continue
+        on_the_ground = opened(document.get("m_GearManagerSerialized"))
+        for item in (on_the_ground.get("m_SerializedItems") or []) if isinstance(on_the_ground, dict) else []:
+            yield one(item)
+        containers = opened(document.get("m_ContainerManagerSerialized"))
+        listed = containers.get("m_SerializedContainers") if isinstance(containers, dict) else None
+        for container in listed or []:
+            inside = opened(container.get("m_SearializedContainer")) if isinstance(container, dict) else None
+            for item in (inside.get("m_SerializedItems") or []) if isinstance(inside, dict) else []:
+                yield one(item)
 
 
 @unittest.skipUnless(real_saves(), "set TLD_SAVE_DIR to the folder that holds your saves")
@@ -346,6 +520,26 @@ class RealSaveTests(ReaderCase):
                 self.assertEqual(rows[0], reader.HEADERS)
                 self.assertEqual(len(rows) - 1, expected)
         self.assertEqual(sorted(path.name for path in folder.iterdir()), before)
+
+    def test_amounts_match_what_the_codec_decodes_from_every_real_save(self) -> None:
+        for save in real_saves():
+            with self.subTest(save=save.name):
+                records = [record for record in reader.read_save(save).records
+                           if record.location_type in ("player_inventory", "floor", "container")]
+                read = Counter((record.prefab, record.unit_weight_kg, record.liters, record.calories)
+                               for record in records)
+                self.assertEqual(read, Counter(amounts_from_the_codec(save)))
+
+    def test_amounts_of_every_real_save_are_in_a_sane_range(self) -> None:
+        for save in real_saves():
+            for record in reader.read_save(save).records:
+                with self.subTest(save=save.name, prefab=record.prefab):
+                    if record.unit_weight_kg is not None:
+                        self.assertTrue(0 < record.unit_weight_kg <= 100, record.unit_weight_kg)
+                    if record.liters is not None:
+                        self.assertTrue(0 <= record.liters <= 100, record.liters)
+                    if record.calories is not None:
+                        self.assertTrue(0 <= record.calories <= 20000, record.calories)
 
     def test_no_real_save_reports_a_region_named_milton(self) -> None:
         for save in real_saves():

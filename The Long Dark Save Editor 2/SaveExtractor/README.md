@@ -8,7 +8,7 @@ except the wiki helper, which needs the `requests` package.
 | File | What it does |
 |---|---|
 | `tld_save_reader.py` | Lists every item in a save, as a summary or a CSV |
-| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, and how it decompresses |
+| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, how it decompresses, and the weight, liters and calories it reads |
 | `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, and where the prefab comes from |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
 | `tld_wiki_updater.py` | Lists items on the game's wiki that the item table does not cover. Needs internet access and the `requests` package |
@@ -55,6 +55,13 @@ is a spoiler, so it is off by default.
 | `count`, `condition_pct` | Stack size and condition. Both are unknown for unsearched loot |
 | `x`, `y`, `z` | Position in the scene |
 | `source` | `base`, `DLC01` (Tales from the Far Territory), `DLC02` (Iron Road), `mod:<pack>`, or `legacy` |
+| `unit_weight_kg` | Weight of one unit in kilograms, as the save stores it. For a stack, multiply by `count`. Blank when the save stores no weight: water, other liquids, powders, papers and keys |
+| `liters` | Liquid the item holds, in liters: the water you carry, a bottle or can, or the fuel in a lamp. Blank when the item holds none, or the game has not set the amount yet |
+| `calories` | Calories left in one unit of a food item |
+
+`unit_weight_kg` is the weight of a whole unit. The game keeps the same number for a food item
+that is half eaten, and it does not include the liquid inside a container. So the sum of
+these weights is not the carried weight that the game shows.
 
 ## Check that a save can be rebuilt exactly
 
@@ -350,7 +357,10 @@ skipped there.
 
 - `region` stays blank for the two mine transition zones and for reused interiors
   (such as `TrailerC`) in a save that has visited more than one region.
-- Water is reported as one stack. The volume is not read.
+- The reader does not work out the weight the game shows for what you carry. It reports the
+  stored weight of each item (`unit_weight_kg`), which leaves out liquid, the part of a food
+  item already eaten, and wet clothing.
+- Powders (flour, salt, oats, gunpowder) store their amount as a weight. It is not read.
 - Saves from before 2018 use a different format and are not supported.
 - No save checked so far contains text outside plain ASCII. If the game writes such text
   in a form `tld_save_codec.py` does not reproduce, `verify` reports `FAILED` for that save.
