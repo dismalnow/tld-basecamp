@@ -17,6 +17,13 @@ place after a checked backup.
 `SaveExtractor/README.md` is the user guide and lists every tool. Read the part about a tool
 before you change that tool, and update it in the same change.
 
+## What to work on
+
+The owner decides what is built and in what order. The plan, and the state of each piece, is
+in `The Long Dark Save Editor 2/SaveExtractor/ROADMAP.md`. Do not start an item from it on
+your own: ask the owner which one to take. When a change finishes or advances an item,
+update that file in the same pull request.
+
 ## Commands
 
 Run these from `The Long Dark Save Editor 2/SaveExtractor`.

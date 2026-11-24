@@ -21,6 +21,7 @@ except the wiki helper, which needs the `requests` package.
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
+| `ROADMAP.md` | What gets built next, in what order, and where each piece stands |
 
 Run the commands below from this folder. From anywhere else, put this folder's full
 path in front of the script name, or Python will not find the script.
