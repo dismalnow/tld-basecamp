@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, the condition of an inventory item, or the liquid an inventory item holds |
+| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, the condition of an inventory item, the liquid an inventory item holds, or the calories left in a food item |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -107,17 +107,19 @@ A document that cannot be written back identically is refused. Nothing is change
 Checked on 2026-11-20: 15 of 15 real saves rebuild byte for byte. They span game
 changelists 157357 to 189457 (v2.60).
 
-## Change a count, a condition or an amount of liquid
+## Change a count, a condition, an amount of liquid or calories
 
 `tld_save_edit.py` changes one value in a save and writes the result to a new file. The
 save you name is only read. It can set the count of a stack in the player's inventory, the
-condition of an item in the player's inventory, or the liquid such an item holds.
+condition of an item in the player's inventory, the liquid such an item holds, or the
+calories left in a food item there.
 
 | Command | Tested in the game |
 |---|---|
 | `set-count` | Yes, on game v2.60 |
 | `set-condition` | Yes, on game v2.60 |
 | `set-liters` | Not yet. Its own output says so |
+| `set-calories` | Not yet. Its own output says so |
 
 ### Count
 
@@ -204,6 +206,60 @@ What the tool does not know: how much an item can hold. It will write 5 liters i
 half-liter bottle, and what the game makes of that is untested. An item whose record holds
 no amount at all, such as unsafe water when you carry none, is refused, because setting it
 would add a field and not change a value.
+
+### Calories
+
+Not tested in the game yet: nobody has loaded a save changed by `set-calories`. Try it on a
+save you can afford to lose.
+
+```powershell
+python tld_save_edit.py foods $save
+python tld_save_edit.py set-calories $save --item GEAR_Crackers --entry 11 --calories 300 --out "$env:TEMP\sandbox15.edited"
+```
+
+`foods` lists the inventory items with calories. `calories` is what is left, exactly as the
+save holds it. `full` is the save's figure for an untouched item. The new amount runs from 1
+to 9999 and may have decimals. When the inventory holds more than one of an item, add
+`--entry` with the number from that list.
+
+```text
+entry  item                        count  calories  full
+   11  GEAR_Crackers                         600.0  600.0
+  148  GEAR_BirchbarkTea                     100.0  100.0
+  150  GEAR_BurdockPrepared            1     275.0  275.0
+  ...
+67 items with calories among 443 inventory items in sandbox15.
+```
+
+```text
+Save:     sandbox15, 585,798 bytes, passes the exact rebuild check
+Item:     GEAR_Crackers, inventory entry 11
+Change:   calories 600.0 -> 300.0
+Checked:  the edited save differs from the original in exactly this one value
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by set-calories has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,804 bytes
+SHA-256:  061fd11e19bbe0dffe2d834e020b403016678242b9af8b4def0b0ec16a41e32f
+sandbox15 itself was not changed.
+```
+
+Things to know about calories:
+
+- The amount is stored as a 32-bit float, the way the game writes it (checked against all
+  176 food items in the inventories of 14 saves). A number with more digits than such a
+  float holds is rounded, and the `Change` line shows what was written: `1234.56789` becomes
+  `1234.56787`.
+- For a stack, the save keeps one figure, the calories of one unit, and that is the figure
+  that changes. The `Change` line then ends with `per unit, in a stack of 3`. In 14 real
+  saves every stack of two or more holds untouched food (12 of 12), so what the game does
+  with a stack of partly eaten food is unknown.
+- `full` is not a limit. Two cooked fish in a real save hold more than that figure, and the
+  tool writes more than it too.
+- Only the calories change. The stored weight stays as it is, which is what the game does
+  itself: in a real save, two partly eaten pieces of cooked moose have the same stored weight
+  as the three whole ones next to them. Whether a package is open is left alone too.
+- The lowest amount is 1, because the game removes an item with nothing left. Removing an
+  item is a separate edit that is not built yet: see `ROADMAP.md`.
 
 ### The checks
 
@@ -382,8 +438,9 @@ $env:TLD_SAVE_DIR = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival"
 python -m unittest -v
 ```
 
-With `TLD_SAVE_DIR` set, the edit tests also change one count and one condition in each
-real save. That happens in memory only: no file is written. The apply tests copy each real
+With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
+liquid and one amount of calories in each real save that has them. That happens in memory
+only: no file is written. The apply tests copy each real
 save into a temporary folder and work on the copy. The reader tests write each real save's
 CSV to a temporary folder. Your save folder is only read. Allow about five minutes for the
 whole run.

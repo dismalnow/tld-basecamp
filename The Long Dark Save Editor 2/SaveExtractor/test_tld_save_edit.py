@@ -28,7 +28,7 @@ from unittest import mock
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import EditError, Item, Liquid, Stack
+from tld_save_edit import EditError, Food, Item, Liquid, Stack
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -444,6 +444,245 @@ class SetLitersTests(unittest.TestCase):
             with self.assertRaises(EditError) as caught:
                 edit.set_item_liters(original, "GEAR_WaterSupplyPotable", Decimal("2.5"))
         self.assertIn("did not change exactly the one value asked for", str(caught.exception))
+
+
+def food_item(prefab: str, record: JsonValue = None, count: Optional[str] = None) -> Dict[str, JsonValue]:
+    """An inventory item with a food record, or with an empty slot for one."""
+    made = item(prefab, count, "1.0")
+    made["m_SerializedGear"].value["m_FoodItemSerialized"] = record        # type: ignore[union-attr,index]
+    return made
+
+
+def food_record(left: str, full: str) -> NestedJson:
+    return NestedJson({"m_CaloriesRemainingProxy": Number(left), "m_CaloriesTotal": Number(full),
+                       "m_HoursPlayed": Number("213.6582"), "m_Opened": False})
+
+
+def foods_save(left: Optional[Dict[int, str]] = None, full: Optional[Dict[int, str]] = None) -> bytes:
+    """A save whose inventory holds food in the forms real saves show, and items without calories.
+
+    left and full replace what is left, or the figure for an untouched one, in the entries they name.
+    """
+    items: List[JsonValue] = [
+        # 0: more left than the figure for an untouched one, as two cooked fish have in a real save
+        food_item("GEAR_CookedLakeWhiteFish", food_record("689.2364", "461.6905")),
+        # 1 and 2: two of the same kind, the first partly eaten
+        food_item("GEAR_MRE", food_record("846.509155", "1750.0")),
+        food_item("GEAR_MRE", food_record("1750.0", "1750.0")),
+        # 3: a stack
+        food_item("GEAR_CookedBarPemmican", food_record("450.0", "450.0"), count="3"),
+        # 4: calories in a form the game does not write
+        food_item("GEAR_EnergyBar", food_record("2.5E+2", "500.0")),
+        # 5: a record without the figure for an untouched one
+        food_item("GEAR_GranolaBar", NestedJson({"m_CaloriesRemainingProxy": Number("29.59488")})),
+        # 6: no food record. 7: an empty slot for one. 8: a record without calories
+        item("GEAR_Hatchet", None, "1.0"),
+        food_item("GEAR_Stone"),
+        food_item("GEAR_Soda", NestedJson({"m_CaloriesTotal": Number("250.0")})),
+        # 9 and 10: calories that are no number
+        food_item("GEAR_CandyBar", NestedJson({"m_CaloriesRemainingProxy": Number("NaN"),
+                                               "m_CaloriesTotal": Number("250.0")})),
+        food_item("GEAR_PeanutButter", NestedJson({"m_CaloriesRemainingProxy": "900.0",
+                                                   "m_CaloriesTotal": Number("900.0")})),
+        # 11: a stack of one
+        food_item("GEAR_CattailStalk", food_record("150.0", "150.0"), count="1"),
+    ]
+    for field, changes in (("m_CaloriesRemainingProxy", left), ("m_CaloriesTotal", full)):
+        for entry, literal in (changes or {}).items():
+            items[entry]["m_SerializedGear"].value["m_FoodItemSerialized"].value[field] = Number(literal)
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": items, "m_QuickSelectInstanceIDs": []}
+    return build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)})
+
+
+def calories_path(entry: int) -> str:
+    return liquid_path(entry, "m_FoodItemSerialized > m_CaloriesRemainingProxy")
+
+
+def calories_in(save_bytes: bytes, entry: int) -> JsonValue:
+    return amount_in(save_bytes, entry, "m_FoodItemSerialized", "m_CaloriesRemainingProxy")
+
+
+class FoodListTests(unittest.TestCase):
+    def test_lists_the_items_with_calories_in_save_order(self) -> None:
+        self.assertEqual(edit.list_foods(codec.decode_save(foods_save())), [
+            Food(0, "GEAR_CookedLakeWhiteFish", None, Decimal("689.2364"), Decimal("461.6905")),
+            Food(1, "GEAR_MRE", None, Decimal("846.509155"), Decimal("1750.0")),
+            Food(2, "GEAR_MRE", None, Decimal("1750.0"), Decimal("1750.0")),
+            Food(3, "GEAR_CookedBarPemmican", 3, Decimal("450.0"), Decimal("450.0")),
+            Food(4, "GEAR_EnergyBar", None, Decimal("250"), Decimal("500.0")),
+            Food(5, "GEAR_GranolaBar", None, Decimal("29.59488"), None),
+            Food(11, "GEAR_CattailStalk", 1, Decimal("150.0"), Decimal("150.0")),
+        ])
+
+    def test_a_save_without_food_gives_an_empty_list(self) -> None:
+        self.assertEqual(edit.list_foods(codec.decode_save(build_save())), [])
+
+    def test_an_entry_without_a_name_is_left_out(self) -> None:
+        save = codec.decode_save(foods_save())
+        del edit._inventory_items(save)[0]["m_PrefabName"]
+        self.assertEqual([food.entry for food in edit.list_foods(save)], [1, 2, 3, 4, 5, 11])
+
+
+class SetCaloriesTests(unittest.TestCase):
+    def test_changes_exactly_one_value(self) -> None:
+        original = foods_save()
+        result = edit.set_item_calories(original, "GEAR_CookedLakeWhiteFish", 500)
+        self.assertEqual((result.prefab, result.entry, result.count, result.old_calories, result.new_calories),
+                         ("GEAR_CookedLakeWhiteFish", 0, None, "689.2364", "500.0"))
+        # Built independently, with the one amount changed.
+        self.assertEqual(result.data, foods_save({0: "500.0"}))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(calories_path(0), "689.2364", "500.0")])
+        self.assertEqual(calories_in(result.data, 0), Number("500.0"))
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_the_amount_is_written_the_way_the_game_writes_a_float(self) -> None:
+        # The last one has more digits than a 32-bit float holds: the nearest float is 1234.56787109375.
+        cases = ((1750, "1750.0"), (62.5, "62.5"), (689.2364, "689.2364"), (846.509155, "846.509155"),
+                 (120.000008, "120.000008"), (13.4822607, "13.4822607"), (1234.56789, "1234.56787"))
+        for calories, literal in cases:
+            with self.subTest(calories=calories):
+                result = edit.set_item_calories(foods_save(), "GEAR_CattailStalk", calories)
+                self.assertEqual(result.new_calories, literal)
+                self.assertEqual(calories_in(result.data, 11), Number(literal))
+
+    def test_floats_in_the_range_of_calories_are_written_with_seven_digits_or_nine(self) -> None:
+        # Literals copied from real saves. Each must come back exactly as the game wrote it.
+        for literal in ("689.2364", "688.2153", "846.509155", "310.302826", "1249.26721", "122.235107",
+                        "13.4822607", "69.35612", "571.1395", "29.59488", "120.000008", "283.679169",
+                        "5.0", "1750.0"):
+            with self.subTest(literal):
+                self.assertEqual(edit.float32_literal(float(literal)), literal)
+
+    def test_a_stack_keeps_its_count(self) -> None:
+        result = edit.set_item_calories(foods_save(), "GEAR_CookedBarPemmican", 300)
+        self.assertEqual(result.count, 3)
+        self.assertEqual(result.data, foods_save({3: "300.0"}))
+        self.assertEqual(edit.list_foods(codec.decode_save(result.data))[3],
+                         Food(3, "GEAR_CookedBarPemmican", 3, Decimal("300.0"), Decimal("450.0")))
+
+    def test_an_entry_number_picks_one_of_several(self) -> None:
+        result = edit.set_item_calories(foods_save(), "GEAR_MRE", 1750, entry=1)
+        self.assertEqual((result.entry, result.old_calories, result.new_calories), (1, "846.509155", "1750.0"))
+        self.assertEqual(result.data, foods_save({1: "1750.0"}))
+
+    def test_more_than_the_figure_for_an_untouched_one_is_allowed(self) -> None:
+        result = edit.set_item_calories(foods_save(), "GEAR_MRE", 2500, entry=2)
+        self.assertEqual((result.old_calories, result.new_calories), ("1750.0", "2500.0"))
+        self.assertEqual(result.data, foods_save({2: "2500.0"}))
+
+    def test_an_amount_in_a_form_the_game_does_not_write_can_be_replaced(self) -> None:
+        result = edit.set_item_calories(foods_save(), "GEAR_EnergyBar", 300)
+        self.assertEqual((result.old_calories, result.new_calories), ("2.5E+2", "300.0"))
+
+    def test_an_item_without_the_figure_for_an_untouched_one_can_be_set(self) -> None:
+        result = edit.set_item_calories(foods_save(), "GEAR_GranolaBar", 300)
+        self.assertEqual((result.entry, result.old_calories, result.new_calories), (5, "29.59488", "300.0"))
+
+    def test_the_ends_of_the_range_are_allowed(self) -> None:
+        for calories, literal in ((1, "1.0"), (9999, "9999.0")):
+            with self.subTest(calories=calories):
+                result = edit.set_item_calories(foods_save(), "GEAR_CookedLakeWhiteFish", calories)
+                self.assertEqual(result.new_calories, literal)
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = foods_save()
+        kept = bytes(original)
+        edit.set_item_calories(original, "GEAR_CookedLakeWhiteFish", 500)
+        self.assertEqual(original, kept)
+
+    def test_requests_that_do_not_name_exactly_one_item_with_calories_are_refused(self) -> None:
+        cases = (
+            ("GEAR_MRE", None, "holds 2 entries of GEAR_MRE with calories: entry 1 (846.509155), "
+                               "entry 2 (1750.0). Add --entry"),
+            ("GEAR_MRE", 0, "inventory entry 0 is GEAR_CookedLakeWhiteFish, not GEAR_MRE. Run foods again"),
+            ("GEAR_MRE", 40, "there is no inventory entry 40. Entries run from 0 to 11"),
+            ("GEAR_Mre", None, "there is no GEAR_Mre in the inventory. Did you mean GEAR_MRE?"),
+            ("GEAR_Rifle", None, "there is no GEAR_Rifle in the inventory. Run foods to see the item names."),
+            ("GEAR_Hatchet", None, "GEAR_Hatchet is in the inventory, but the save holds no calories for it"),
+            ("GEAR_Hatchet", 6, "inventory entry 6 is GEAR_Hatchet, and the save holds no calories for it"),
+            ("GEAR_Stone", None, "the save holds no calories for it, so there are none to set"),
+            ("GEAR_Soda", None, "the save holds no calories for it"),
+            ("GEAR_CandyBar", None, "the save holds no calories for it"),
+            ("GEAR_PeanutButter", 10, "the save holds no calories for it"),
+        )
+        for prefab, entry, message in cases:
+            with self.subTest(prefab=prefab, entry=entry):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_item_calories(foods_save(), prefab, 100, entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_a_close_name_is_only_suggested_when_that_item_has_calories(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_item_calories(foods_save(), "GEAR_Hatchett", 100)
+        self.assertIn("there is no GEAR_Hatchett in the inventory. Run foods to see the item names.",
+                      str(refused.exception))
+
+    def test_a_long_list_of_the_same_item_is_cut_short(self) -> None:
+        items: List[JsonValue] = [food_item("GEAR_MRE", food_record(f"{100 + entry}.0", "1750.0"))
+                                  for entry in range(10)]
+        inventory: Dict[str, JsonValue] = {"m_SerializedItems": items, "m_QuickSelectInstanceIDs": []}
+        save = build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)})
+        with self.assertRaises(EditError) as refused:
+            edit.set_item_calories(save, "GEAR_MRE", 500)
+        self.assertIn("holds 10 entries of GEAR_MRE with calories: entry 0 (100.0), entry 1 (101.0), ",
+                      str(refused.exception))
+        self.assertIn("entry 7 (107.0) and 2 more. Add --entry to say which one", str(refused.exception))
+        self.assertEqual(edit.set_item_calories(save, "GEAR_MRE", 500, entry=9).old_calories, "109.0")
+
+    def test_the_amount_it_already_holds_is_refused(self) -> None:
+        for prefab, calories, shown in (("GEAR_CookedLakeWhiteFish", 689.2364, "689.2364"),
+                                        ("GEAR_EnergyBar", 250, "250.0")):
+            with self.subTest(prefab=prefab):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_item_calories(foods_save(), prefab, calories)
+                self.assertIn(f"already holds {shown} calories. Nothing to change", str(refused.exception))
+
+    def test_amounts_out_of_range_are_refused_before_the_save_is_read(self) -> None:
+        for calories in (0, 0.5, 0.999, -1, 9999.5, 10000, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(calories=calories):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_item_calories(b"not a save", "GEAR_MRE", calories)
+                self.assertIn("the calories must be a number from 1 to 9999, not ", str(refused.exception))
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_item_calories(b"not a save", "GEAR_MRE", 100)
+        self.assertIn("does not pass the exact rebuild check", str(refused.exception))
+
+    def test_an_edit_that_writes_the_wrong_value_is_caught(self) -> None:
+        # Fault injection: the encoder hands back a save with 300 calories where 500 were asked for.
+        original = foods_save()
+        wrong = foods_save({0: "300.0"})
+        real_encode = codec.encode_save
+
+        def encode_wrongly(save: DecodedSave) -> bytes:
+            encoded = real_encode(save)
+            return encoded if encoded in (original, wrong) else wrong
+
+        with mock.patch.object(codec, "encode_save", side_effect=encode_wrongly):
+            with self.assertRaises(EditError) as caught:
+                edit.set_item_calories(original, "GEAR_CookedLakeWhiteFish", 500)
+        self.assertIn("did not change exactly the one value asked for", str(caught.exception))
+        self.assertIn("689.2364 -> 300.0", str(caught.exception))
+
+    def test_an_edit_that_also_changes_the_figure_for_an_untouched_one_is_caught(self) -> None:
+        # Fault injection: the encoder hands back a save where m_CaloriesTotal changed as well.
+        original = foods_save()
+        meant = foods_save({0: "500.0"})
+        wrong = foods_save({0: "500.0"}, full={0: "500.0"})
+        real_encode = codec.encode_save
+
+        def encode_wrongly(save: DecodedSave) -> bytes:
+            encoded = real_encode(save)
+            return wrong if encoded == meant else encoded
+
+        with mock.patch.object(codec, "encode_save", side_effect=encode_wrongly):
+            with self.assertRaises(EditError) as caught:
+                edit.set_item_calories(original, "GEAR_CookedLakeWhiteFish", 500)
+        self.assertIn("did not change exactly the one value asked for", str(caught.exception))
+        self.assertIn("m_CaloriesTotal: 461.6905 -> 500.0", str(caught.exception))
 
 
 class StackListTests(unittest.TestCase):
@@ -971,7 +1210,7 @@ class CommandTests(unittest.TestCase):
                                         "--count", "40", "--out", str(self.out))
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
-        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters"}))
+        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -1005,10 +1244,110 @@ class CommandTests(unittest.TestCase):
         self.assertIn("'plenty' is not a number of liters", err.getvalue())
         self.assertFalse(self.out.exists())
 
+    def test_foods_lists_the_items_with_calories(self) -> None:
+        self.save.write_bytes(foods_save())
+        code, out, err = self.run_command("foods", str(self.save))
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "entry  item                      count    calories  full")
+        self.assertEqual([line.split() for line in lines[1:8]], [
+            ["0", "GEAR_CookedLakeWhiteFish", "689.2364", "461.6905"],
+            ["1", "GEAR_MRE", "846.509155", "1750.0"],
+            ["2", "GEAR_MRE", "1750.0", "1750.0"],
+            ["3", "GEAR_CookedBarPemmican", "3", "450.0", "450.0"],
+            ["4", "GEAR_EnergyBar", "250", "500.0"],
+            ["5", "GEAR_GranolaBar", "29.59488"],
+            ["11", "GEAR_CattailStalk", "1", "150.0", "150.0"],
+        ])
+        self.assertEqual(lines[4], "    3  GEAR_CookedBarPemmican        3       450.0  450.0")
+        self.assertEqual(lines[6], "    5  GEAR_GranolaBar                    29.59488")
+        self.assertEqual(lines[8], "7 items with calories among 12 inventory items in sandbox15.")
+        self.assertEqual(err, "")
+
+    def test_foods_on_a_save_without_food(self) -> None:
+        code, out, _ = self.run_command("foods", str(self.save))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["entry  item  count  calories  full",
+                                            "0 items with calories among 5 inventory items in sandbox15."])
+
+    def test_set_calories_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(foods_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("set-calories", str(self.save), "--item", "GEAR_CookedLakeWhiteFish",
+                                          "--calories", "500", "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), foods_save({0: "500.0"}))
+        self.assertIn("GEAR_CookedLakeWhiteFish, inventory entry 0", out)
+        self.assertIn("Change:   calories 689.2364 -> 500.0\n", out)
+        self.assertIn("differs from the original in exactly this one value", out)
+        self.assertIn("2 of 3 entries are byte for byte unchanged", out)
+        self.assertIn("Untested: no save changed by set-calories has been loaded in the game yet", out)
+        self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_set_calories_on_a_stack_says_that_the_figure_is_for_one_unit(self) -> None:
+        self.save.write_bytes(foods_save())
+        code, out, _ = self.run_command("set-calories", str(self.save), "--item", "GEAR_CookedBarPemmican",
+                                        "--calories", "300.5", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.out.read_bytes(), foods_save({3: "300.5"}))
+        self.assertIn("Change:   calories 450.0 -> 300.5 per unit, in a stack of 3\n", out)
+
+    def test_a_stack_of_one_is_not_called_a_stack(self) -> None:
+        self.save.write_bytes(foods_save())
+        code, out, _ = self.run_command("set-calories", str(self.save), "--item", "GEAR_CattailStalk",
+                                        "--calories", "75", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("Change:   calories 150.0 -> 75.0\n", out)
+
+    def test_set_calories_with_an_entry_number(self) -> None:
+        self.save.write_bytes(foods_save())
+        code, out, _ = self.run_command("set-calories", str(self.save), "--item", "GEAR_MRE", "--entry", "2",
+                                        "--calories", "875", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("GEAR_MRE, inventory entry 2", out)
+        self.assertEqual(self.out.read_bytes(), foods_save({2: "875.0"}))
+
+    def test_set_calories_refusals_write_nothing(self) -> None:
+        self.save.write_bytes(foods_save())
+        fish = ["--item", "GEAR_CookedLakeWhiteFish"]
+        cases = {
+            "several": (["--item", "GEAR_MRE", "--calories", "100"], "Add --entry to say which one"),
+            "no calories": (["--item", "GEAR_Hatchet", "--calories", "100"], "holds no calories"),
+            "unknown item": (["--item", "GEAR_Nope", "--calories", "100"], "there is no GEAR_Nope in the"),
+            "same amount": (fish + ["--calories", "689.2364"], "already holds 689.2364 calories"),
+            "too much": (fish + ["--calories", "10000"], "from 1 to 9999, not 10000"),
+            "nothing left": (fish + ["--calories", "0"], "from 1 to 9999, not 0"),
+            "negative": (fish + ["--calories=-1"], "from 1 to 9999, not -1"),
+            "not a number": (fish + ["--calories", "nan"], "from 1 to 9999, not nan"),
+        }
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                before = self.snapshot()
+                code, out, err = self.run_command("set-calories", str(self.save), *options,
+                                                  "--out", str(self.out))
+                self.assertEqual(code, 1)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+
+    def test_a_calories_value_that_is_not_a_number_is_a_usage_error(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as caught:
+                edit.main(["set-calories", str(self.save), "--item", "GEAR_MRE", "--calories", "plenty",
+                           "--out", str(self.out)])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("--calories", err.getvalue())
+        self.assertFalse(self.out.exists())
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--out", str(self.out)],
                           ["set-liters", str(self.save), "--item", "GEAR_LampFuel", "--out", str(self.out)],
+                          ["set-calories", str(self.save), "--item", "GEAR_MRE", "--out", str(self.out)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--count", "two",
                            "--out", str(self.out)]):
             with self.subTest(" ".join(arguments[:1]) or "no arguments"):
@@ -1100,6 +1439,55 @@ class RealSaveTests(unittest.TestCase):
                             and amount_field in record.value:
                         with self.subTest(save=path.name, entry=entry):
                             self.assertIsNotNone(edit._liquid_of(item))
+
+    def test_one_amount_of_calories_can_be_changed_in_every_real_save(self) -> None:
+        """In memory only. No file is written."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        edited = 0
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.list_foods(codec.decode_save(original))
+                if not before:
+                    continue
+                target = before[0]
+                calories = Decimal("125.5") if target.calories != Decimal("125.5") else Decimal("250.5")
+                result = edit.set_item_calories(original, target.prefab, float(calories), entry=target.entry)
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                after = edit.list_foods(codec.decode_save(result.data))
+                expected = [Food(food.entry, food.prefab, food.count,
+                                 calories if food.entry == target.entry else food.calories, food.full)
+                            for food in before]
+                self.assertEqual(after, expected)
+                edited += 1
+        self.assertTrue(edited, "no real save holds an item with calories")
+
+    def test_every_amount_of_calories_in_a_real_inventory_can_be_read(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        for path in codec.find_saves(folder):
+            save = codec.decode_save(path.read_bytes())
+            for entry, item in enumerate(edit._inventory_items(save)):
+                record = item["m_SerializedGear"].value.get("m_FoodItemSerialized")
+                if isinstance(record, NestedJson) and isinstance(record.value, dict) \
+                        and "m_CaloriesRemainingProxy" in record.value:
+                    with self.subTest(save=path.name, entry=entry):
+                        self.assertIsNotNone(edit._food_of(item))
+
+    def test_every_stored_amount_of_calories_is_in_the_form_this_tool_writes(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        checked = 0
+        for path in codec.find_saves(folder):
+            save = codec.decode_save(path.read_bytes())
+            for entry, item in enumerate(edit._inventory_items(save)):
+                food = edit._food_of(item)
+                if food is not None and edit.MIN_CALORIES <= food.calories <= edit.MAX_CALORIES:
+                    with self.subTest(save=path.name, entry=entry):
+                        self.assertEqual(edit.float32_literal(float(food.literal)), food.literal)
+                    checked += 1
+        self.assertTrue(checked, "no real save holds an item with calories")
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])
