@@ -12,7 +12,7 @@ change finishes or advances an item, update this file in the same pull request.
 |---|---|---|
 | F | Foundations: the tests run on GitHub, the wiki helper has tests, the folder has one decompressor, and coding agents have a context file | Done (pull requests 1 to 4) |
 | R | Reader depth: more of what a save holds, read correctly | Built (pull requests 5, 6 and 8). Open: the owner compares a few weights, liters and calories with the game's inventory screen |
-| I | Inventory edits: add an item, remove an item, repair everything, liters, calories, rounds | Not started |
+| I | Inventory edits: add an item, remove an item, repair everything, liters, calories, rounds | In progress |
 | P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | Not started |
 | Trader | The Trader: read his state (trust, contacts, offers, special requests), a report command, and one edit (trust) | Not started. The owner has not yet confirmed the place in the order or the edit |
 | T | Live tracker: where animals, corpses, Tale objects and one-of-a-kind items are as of the last game save, then a watcher that follows new saves | Not started |
@@ -25,6 +25,17 @@ change finishes or advances an item, update this file in the same pull request.
 | Weight, liters and calories for every item | Done (pull request 5) |
 | The game's display name where a source states it | Done for 617 of 1,040 prefabs (pull request 6). The other 423 need the game's own text table |
 | A region for every record outside the inventory | Done (pull request 8). In 14 real saves no such record has a blank region now |
+
+## Block I in detail
+
+| Item | State |
+|---|---|
+| Liters: the liquid an inventory item holds | Built (pull request 9). Not tested in game |
+| Calories of a food item | Not started |
+| Rounds in a weapon | Not started |
+| Repair everything in the inventory | Not started |
+| Remove an item | Not started |
+| Add an item | Not started |
 
 ## What holds for every block
 
