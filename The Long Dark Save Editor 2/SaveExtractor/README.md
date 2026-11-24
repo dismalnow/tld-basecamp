@@ -335,6 +335,11 @@ whole run.
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.
 
+GitHub runs the same tests on every pull request and on every push to `master`, on
+Windows and Linux with Python 3.9 through 3.14. The workflow is
+`.github/workflows/tests.yml` at the top of the repository. It has no real saves, so
+the checks that need `TLD_SAVE_DIR` are skipped there.
+
 ## Known gaps
 
 - `region` stays blank for the two mine transition zones and for reused interiors
