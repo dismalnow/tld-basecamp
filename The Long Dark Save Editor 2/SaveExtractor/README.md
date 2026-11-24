@@ -1,8 +1,8 @@
 # SaveExtractor
 
-Python tools for The Long Dark survival saves (game v2.44 and later). No tool here changes
-a save file: the readers only read, and the editor writes its result to a new file.
-Standard library only, Python 3.9 or newer.
+Python tools for The Long Dark survival saves (game v2.44 and later). One tool here changes
+a save file, `tld_save_apply.py`, and only after a checked backup. The readers only read,
+and the editor writes its result to a new file. Standard library only, Python 3.9 or newer.
 
 | File | What it does |
 |---|---|
@@ -13,6 +13,8 @@ Standard library only, Python 3.9 or newer.
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
 | `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, or the condition of an inventory item |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
+| `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
+| `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
 
 The wiki helper lives in `..\tld_mediawiki_api\tld_wiki_updater.py`.
 
@@ -151,8 +153,7 @@ Three checks stand between an edit and a written file. If one fails, nothing is 
 
 The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
 `challenge3` and so on). The tool never overwrites anything. Putting the new file in place
-of the original is a separate step that you do yourself, with the game closed and after a
-backup.
+of the original is a separate step, done by `tld_save_apply.py`: see the next section.
 
 Exit code 0 means done, 1 means refused with the reason printed, and 2 means the save was
 not found or an option was wrong.
@@ -182,6 +183,69 @@ Checked in the game (v2.60, changelist 189457) on a survival save:
   save held 100% with the hit points worked out again, from 52.5 to 75.0.
 
 Both of those saves, as the game wrote them, pass `verify`.
+
+## Put an edited save in place, or put a backup back
+
+`tld_save_apply.py` is the only tool here that changes a save file. `apply` puts a file
+that `tld_save_edit.py` wrote in place of the live save, after copying the live save to a
+backup folder. `restore` puts a backup back. Close the game first.
+
+```powershell
+$save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox15"
+python tld_save_edit.py set-count $save --item GEAR_WoodMatches --count 50 --out "$env:TEMP\sandbox15.edited"
+python tld_save_apply.py apply $save --from "$env:TEMP\sandbox15.edited"
+```
+
+```text
+Save:       sandbox15, 585,798 bytes, last saved by the game at 2026-11-24 04:49:13
+Edited:     C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,798 bytes
+Changes:    1 value differs
+              m_Dict > global > m_Inventory_Serialized > m_SerializedItems[3] > m_SerializedGear > m_StackableItemSerialized > m_UnitsProxy: 40 -> 50
+Checked:    the game is not running
+Checked:    both files pass the exact rebuild check
+Checked:    the edited file was made from the save as it is now
+Backup:     C:\Users\you\TLD-save-backups\sandbox15.backup-20261124-051500, read back and identical
+Replaced:   sandbox15 now holds the edited save, read back and identical
+To undo:    python tld_save_apply.py restore "C:\Users\you\AppData\Local\Hinterland\TheLongDark\Survival\sandbox15" --from "C:\Users\you\TLD-save-backups\sandbox15.backup-20261124-051500"
+```
+
+`apply` refuses, and changes nothing, unless all of this holds:
+
+1. The game is not running. The tool looks for a running program named `tld` (`tld.exe`
+   on Windows).
+2. The live save and the edited file both pass `tld_save_codec.py verify`.
+3. The edited file was made from the live save as it is now. The game stamps the time on a
+   save whenever it writes it, so the tool can tell when the game has saved since the edit
+   was made. It then refuses, because putting the file in place would undo what the game
+   saved. Make the edit again from the current save.
+
+Then it works in this order and stops at the first step that fails:
+
+4. The live save is copied to the backup folder under a new name, and the copy is read back.
+5. The edited content is put in place of the live save in one step, and the save is read
+   back.
+
+To see the backups of a save and put one back:
+
+```powershell
+python tld_save_apply.py backups $save
+python tld_save_apply.py restore $save --from "$HOME\TLD-save-backups\sandbox15.backup-20261124-051500"
+```
+
+`restore` first backs up whatever the live save holds at that moment, so a restore can be
+undone as well. It also works when the live save is damaged or missing. A file is only ever
+put in place of the save it came from.
+
+Backups go to `TLD-save-backups` in your home folder, or to the folder you name with
+`--backup-dir`. A backup is named after the save, the date and the time, for example
+`sandbox15.backup-20261124-051500`. The folder must be outside the game's save folder,
+because Steam Cloud syncs everything under `Hinterland\TheLongDark`. This tool never
+deletes or overwrites a backup.
+
+`--dry-run` runs every check, prints what would happen, and changes nothing.
+
+Exit code 0 means done, 1 means refused or stopped with the reason printed, and 2 means a
+file was not found or an option was wrong.
 
 ## Keep the item table current
 
@@ -228,8 +292,9 @@ python -m unittest -v
 ```
 
 With `TLD_SAVE_DIR` set, the edit tests also change one count and one condition in each
-real save. That happens in memory only: no file is written. Allow a few minutes for the
-whole run.
+real save. That happens in memory only: no file is written. The apply tests copy each real
+save into a temporary folder and work on the copy. Your save folder is only read. Allow
+about five minutes for the whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.
@@ -242,3 +307,5 @@ repository, `Helpers\CLZF.cs`.
 - Saves from before 2018 use a different format and are not supported.
 - No save checked so far contains text outside plain ASCII. If the game writes such text
   in a form `tld_save_codec.py` does not reproduce, `verify` reports `FAILED` for that save.
+- `tld_save_apply.py` knows the game by its Windows program name, `tld.exe`. On other
+  systems it looks for a program named `tld`, and that has not been checked against the game.
