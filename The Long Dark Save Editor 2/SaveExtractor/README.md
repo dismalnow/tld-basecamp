@@ -12,6 +12,7 @@ except the wiki helper, which needs the `requests` package.
 | `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, and where the prefab comes from |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
 | `tld_wiki_updater.py` | Lists items on the game's wiki that the item table does not cover. Needs internet access and the `requests` package |
+| `test_tld_wiki_updater.py` | Tests for `tld_wiki_updater.py`. They need the `requests` package and never reach the wiki |
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
@@ -335,17 +336,21 @@ whole run.
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.
 
+The tests for the wiki helper need the `requests` package, as the helper does. Without it
+they are skipped, and the run still ends with `OK`. They never reach the wiki: a stand-in
+answers in its place, and the report goes to a temporary folder.
+
 GitHub runs the same tests on every pull request and on every push to `master`, on
 Windows and Linux with Python 3.9 through 3.14. The workflow is
-`.github/workflows/tests.yml` at the top of the repository. It has no real saves, so
-the checks that need `TLD_SAVE_DIR` are skipped there.
+`.github/workflows/tests.yml` at the top of the repository. It installs `requests` for
+the wiki helper's tests. It has no real saves, so the checks that need `TLD_SAVE_DIR` are
+skipped there.
 
 ## Known gaps
 
 - `region` stays blank for the two mine transition zones and for reused interiors
   (such as `TrailerC`) in a save that has visited more than one region.
 - Water is reported as one stack. The volume is not read.
-- The wiki helper has no automated tests.
 - Saves from before 2018 use a different format and are not supported.
 - No save checked so far contains text outside plain ASCII. If the game writes such text
   in a form `tld_save_codec.py` does not reproduce, `verify` reports `FAILED` for that save.
