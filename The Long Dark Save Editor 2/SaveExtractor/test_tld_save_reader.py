@@ -338,6 +338,153 @@ class RegionLabelTests(unittest.TestCase):
         names = [landmark[0] for landmark in reader.REGION_LANDMARKS["MountainTownRegion"]]
         self.assertIn("Milton (Lower Town)", names)
 
+    def test_the_two_mines_between_regions_carry_their_own_names(self) -> None:
+        for zone, label in (("MineTransitionZone", "Cinder Hills Coal Mine"),
+                            ("HighwayMineTransitionZone", "No. 3 Coal Mine")):
+            with self.subTest(zone=zone):
+                self.assertEqual(reader.region_for_scene(zone, ["CoastalRegion", zone]), label)
+
+
+# Made-up GUIDs of interiors that the game creates once per door.
+DOOR_1 = "11111111-aaaa-4bbb-8ccc-000000000001"
+DOOR_2 = "22222222-aaaa-4bbb-8ccc-000000000002"
+DOOR_3 = "33333333-aaaa-4bbb-8ccc-000000000003"
+DOOR_4 = "44444444-aaaa-4bbb-8ccc-000000000004"
+
+
+class DoorRegionTests(unittest.TestCase):
+    """An interior that carries a door's GUID gets its region from the outdoor zone that holds the door."""
+
+    def test_the_door_wins_over_the_table(self) -> None:
+        zones = ["LakeRegion", "CoastalRegion"]
+        trailer = f"TrailerC_{DOOR_1}"
+        self.assertEqual(reader.region_for_scene(trailer, zones), "Mystery Lake")          # the table's answer
+        self.assertEqual(reader.region_for_scene(trailer, zones, {DOOR_1: "CoastalRegion"}), "Coastal Highway")
+
+    def test_the_door_gives_a_region_where_the_table_gives_none(self) -> None:
+        zones = ["CoastalRegion", "MineTransitionZone"]
+        trailer = f"TrailerC_{DOOR_1}"
+        self.assertEqual(reader.region_for_scene(trailer, zones), "")
+        self.assertEqual(reader.region_for_scene(trailer, zones, {DOOR_1: "CoastalRegion"}), "Coastal Highway")
+
+    def test_without_a_door_for_this_interior_the_table_decides(self) -> None:
+        zones = ["LakeRegion", "CoastalRegion"]
+        trailer = f"TrailerC_{DOOR_1}"
+        for doors in ({}, {DOOR_2: "CoastalRegion"}):
+            with self.subTest(doors=doors):
+                self.assertEqual(reader.region_for_scene(trailer, zones, doors), "Mystery Lake")
+
+    def test_a_door_in_a_zone_without_a_label_changes_nothing(self) -> None:
+        zones = ["LakeRegion", "SomeNewRegion"]
+        self.assertEqual(reader.region_for_scene(f"TrailerC_{DOOR_1}", zones, {DOOR_1: "SomeNewRegion"}),
+                         "Mystery Lake")
+
+    def test_doors_do_not_touch_zones_or_interiors_without_a_guid(self) -> None:
+        zones = ["LakeRegion", "MountainTownRegion"]
+        doors = {DOOR_1: "LakeRegion"}
+        self.assertEqual(reader.region_for_scene("MountainTownRegion", zones, doors), "Mountain Town")
+        self.assertEqual(reader.region_for_scene("PostOfficeA", zones, doors), "Mountain Town")
+        # An outdoor zone keeps its own label even if its key should end in a GUID that a door names.
+        self.assertEqual(reader.region_for_scene(f"MountainTownRegion_{DOOR_1}", zones, doors), "Mountain Town")
+
+
+def door_save() -> bytes:
+    """A save with four trailers, each named after a door, three outdoor zones and one building.
+
+    The zones hold the doors to three of the trailers, and the building holds one to the fourth.
+    The first trailer comes before its zone, as an interior can in a real save.
+    """
+    def matches() -> Dict[str, JsonValue]:
+        gear: Dict[str, JsonValue] = {"m_Position": [Number("1"), Number("2"), Number("3")],
+                                      "m_NormalizedCondition": Number("1.0")}
+        items: Dict[str, JsonValue] = {
+            "m_SerializedItems": [{"m_PrefabName": "GEAR_WoodMatches", "m_SearializedGear": NestedJson(gear)}]}
+        return {"m_GearManagerSerialized": NestedJson(items)}
+
+    def doors(*guids: str) -> NestedJson:
+        entries: List[JsonValue] = [
+            NestedJson({"m_Position": [Number("718.7"), Number("25.6"), Number("586.4")], "m_GUID": guid,
+                        "m_Explored": True, "m_GameGuid": f"99999999-aaaa-4bbb-8ccc-{index:012d}"})
+            for index, guid in enumerate(guids)]
+        return NestedJson({"strings": entries})
+
+    slot = codec.decode_save(small_save()).slot
+    entries = slot["m_Dict"]
+    assert isinstance(entries, dict)
+    entries[f"TrailerC_{DOOR_1}"] = matches()
+    entries["CoastalRegion"] = {**matches(), "m_LoadSceneTriggersSerialized": doors(DOOR_1, DOOR_3)}
+    entries["MineTransitionZone"] = matches()
+    entries["WhalingStationRegion"] = {**matches(), "m_LoadSceneTriggersSerialized": doors(DOOR_3),
+                                       "m_LoadSceneParentSerialized": doors(DOOR_2)}
+    entries[f"TrailerD_{DOOR_2}"] = matches()
+    entries[f"TrailerB_{DOOR_3}"] = matches()        # two zones have a door with this GUID
+    entries[f"TrailerA_{DOOR_4}"] = matches()        # no zone has one: only a building does
+    entries["QuonsetGasStation"] = {**matches(), "m_LoadSceneTriggersSerialized": doors(DOOR_4)}
+    return codec.encode_save(DecodedSave(slot))
+
+
+class DoorRegionSaveTests(ReaderCase):
+    def regions_by_scene(self) -> Dict[str, str]:
+        return {record.scene: record.region for record in reader.read_save(self.save).records}
+
+    def test_each_trailer_gets_the_region_of_the_zone_with_its_door(self) -> None:
+        self.save.write_bytes(door_save())
+        regions = self.regions_by_scene()
+        self.assertEqual(regions[f"TrailerC_{DOOR_1}"], "Coastal Highway")       # listed before its zone
+        self.assertEqual(regions[f"TrailerD_{DOOR_2}"], "Desolation Point")      # door in the second door list
+
+    def test_a_trailer_that_two_zones_or_no_zone_name_stays_blank(self) -> None:
+        self.save.write_bytes(door_save())
+        regions = self.regions_by_scene()
+        self.assertEqual(regions[f"TrailerB_{DOOR_3}"], "")
+        # Only a door of an outdoor zone says where an interior stands. A door inside a building does not.
+        self.assertEqual(regions[f"TrailerA_{DOOR_4}"], "")
+        self.assertEqual(regions["QuonsetGasStation"], "Coastal Highway")
+
+    def test_the_zones_keep_their_own_labels(self) -> None:
+        self.save.write_bytes(door_save())
+        regions = self.regions_by_scene()
+        self.assertEqual(regions["CoastalRegion"], "Coastal Highway")
+        self.assertEqual(regions["MineTransitionZone"], "Cinder Hills Coal Mine")
+        self.assertEqual(regions["WhalingStationRegion"], "Desolation Point")
+
+    def test_records_stay_in_the_order_of_the_save(self) -> None:
+        self.save.write_bytes(door_save())
+        scenes = [record.scene for record in reader.read_save(self.save).records]
+        self.assertEqual(scenes, ["player_inventory", f"TrailerC_{DOOR_1}", "CoastalRegion",
+                                  "MineTransitionZone", "WhalingStationRegion", f"TrailerD_{DOOR_2}",
+                                  f"TrailerB_{DOOR_3}", f"TrailerA_{DOOR_4}", "QuonsetGasStation"])
+
+    def test_a_door_list_that_cannot_be_read_counts_as_no_doors(self) -> None:
+        slot = codec.decode_save(door_save()).slot
+        entries = slot["m_Dict"]
+        assert isinstance(entries, dict)
+        coast = entries["CoastalRegion"]
+        assert isinstance(coast, dict)
+        unreadable: Tuple[JsonValue, ...] = ("{not json", NestedJson({"strings": "not a list"}),
+                                             NestedJson({"strings": Number("5")}),
+                                             NestedJson(["not", "a", "dict"]), None)
+        for broken in unreadable:
+            with self.subTest(broken=repr(broken)):
+                coast["m_LoadSceneTriggersSerialized"] = broken
+                self.save.write_bytes(codec.encode_save(DecodedSave(slot)))
+                regions = self.regions_by_scene()
+                self.assertEqual(regions[f"TrailerC_{DOOR_1}"], "")
+                self.assertEqual(regions[f"TrailerD_{DOOR_2}"], "Desolation Point")
+
+    def test_one_unreadable_door_does_not_hide_the_others(self) -> None:
+        slot = codec.decode_save(door_save()).slot
+        entries = slot["m_Dict"]
+        assert isinstance(entries, dict)
+        coast = entries["CoastalRegion"]
+        assert isinstance(coast, dict)
+        good = NestedJson({"m_GUID": DOOR_1})
+        coast["m_LoadSceneTriggersSerialized"] = NestedJson(
+            {"strings": ["{not json", NestedJson(["a list"]), NestedJson({"m_GUID": Number("7")}),
+                         NestedJson({"m_GUID": ["a", "list"]}), good]})
+        self.save.write_bytes(codec.encode_save(DecodedSave(slot)))
+        self.assertEqual(self.regions_by_scene()[f"TrailerC_{DOOR_1}"], "Coastal Highway")
+
 
 class RegionCsvTests(ReaderCase):
     def test_the_csv_names_the_region_mountain_town(self) -> None:

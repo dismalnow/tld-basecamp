@@ -150,6 +150,13 @@ SCENE_TO_REGION = {
     "BlackrockRegion":       "Blackrock",
     "Ravine":                "Ravine",
     "HighwayTransitionZone": "Crumbling Highway",
+    # The two mines that join regions. The game gives a transition zone no region of its own
+    # (its day log leaves the region of these two empty), so each shows its own name, as the
+    # Ravine and the Crumbling Highway do. The names are the wiki's. Which scene is which mine
+    # follows from real saves: MineTransitionZone adjoins the Coastal Highway, and
+    # HighwayMineTransitionZone lies between Desolation Point and the Crumbling Highway.
+    "MineTransitionZone":        "Cinder Hills Coal Mine",
+    "HighwayMineTransitionZone": "No. 3 Coal Mine",
     # Mystery Lake
     "CampOffice":            "Mystery Lake",
     "LakeCabin":             "Mystery Lake",
@@ -356,16 +363,70 @@ def _is_outdoor_zone(scene_name: str) -> bool:
     return base.endswith("Region") or "Zone" in base or "TrackSection" in base
 
 
-def region_for_scene(scene_name: str, zone_names: list[str]) -> str:
+# An interior that the game creates once per door carries that door's GUID at the end of its scene key.
+_INSTANCE_GUID = re.compile(r"_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+
+# Where an outdoor scene lists its doors. Each door names the interior it leads to in m_GUID.
+_DOOR_FIELDS = ("m_LoadSceneTriggersSerialized", "m_LoadSceneParentSerialized")
+
+
+def _door_guids(scene: dict) -> set[str]:
+    """GUIDs of the interiors that the doors of this scene lead to.
+
+    A door list that cannot be read counts as no doors. Its interiors then get their region
+    from the table, as every interior did before the doors were read.
+    """
+    found: set[str] = set()
+    for field in _DOOR_FIELDS:
+        try:
+            doors = _json_value(scene.get(field))
+        except ValueError:
+            continue
+        entries = doors.get("strings") if isinstance(doors, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            try:
+                door = _json_value(entry)
+            except ValueError:
+                continue
+            if isinstance(door, dict) and isinstance(door.get("m_GUID"), str):
+                found.add(door["m_GUID"])
+    return found
+
+
+def _doors_by_guid(zones: dict[str, dict]) -> dict[str, str]:
+    """For each interior GUID, the one outdoor zone that has a door to it.
+
+    A GUID that two zones name is left out, because it does not say where the interior stands.
+    """
+    owner: dict[str, str] = {}
+    shared: set[str] = set()
+    for zone_name, scene in zones.items():
+        for guid in _door_guids(scene):
+            if owner.setdefault(guid, zone_name) != zone_name:
+                shared.add(guid)
+    return {guid: zone_name for guid, zone_name in owner.items() if guid not in shared}
+
+
+def region_for_scene(scene_name: str, zone_names: list[str], doors: Optional[dict[str, str]] = None) -> str:
     """Region label for a scene, checked against the outdoor zones present in the save.
 
-    Generic interiors such as TrailerC are reused in several regions, so the table's
-    answer is kept only when that region's zone is in the same save. When every zone
-    in the save belongs to one region, an interior can only be in that region.
+    doors maps the GUID of an interior to the outdoor zone that has a door to it (see
+    _doors_by_guid). It is the save's own record of where that interior stands, so the
+    zone's region wins over the table.
+
+    Without a door, the table decides. Generic interiors such as TrailerC are reused in
+    several regions, so the table's answer is kept only when that region's zone is in the
+    same save. When every zone in the save belongs to one region, an interior can only be
+    in that region.
     """
     label = _static_region(scene_name)
     if _is_outdoor_zone(scene_name) or not zone_names:
         return label
+    instance = _INSTANCE_GUID.search(scene_name)
+    if instance and doors:
+        through_the_door = _static_region(doors.get(instance.group(1), ""))
+        if through_the_door:
+            return through_the_door
     zone_labels = {_static_region(zone) for zone in zone_names}
     if label and label in zone_labels:
         return label
@@ -632,6 +693,9 @@ def read_save(path: Path, include_unsearched: bool = False) -> SaveContents:
         failed_scenes=[],
     )
 
+    # Every scene is decoded before any is read, because an interior's region can come from
+    # a door in an outdoor zone that the save lists after it.
+    decoded: dict[str, dict] = {}
     for scene_name, b64_val in scenes.items():
         if scene_name in SKIP_SCENES or not isinstance(b64_val, str):
             continue
@@ -641,13 +705,15 @@ def read_save(path: Path, include_unsearched: bool = False) -> SaveContents:
             print(f"  [warn] could not decode scene '{scene_name}': {e}", file=sys.stderr)
             contents.failed_scenes.append(scene_name)
             continue
-        if not isinstance(scene, dict):
-            continue
+        if isinstance(scene, dict):
+            decoded[scene_name] = scene
 
+    doors = _doors_by_guid({name: decoded[name] for name in zone_names if name in decoded})
+    for scene_name, scene in decoded.items():
         if scene_name == "global":
             contents.records.extend(extract_player_inventory(scene))
         else:
-            region = region_for_scene(scene_name, zone_names)
+            region = region_for_scene(scene_name, zone_names, doors)
             contents.records.extend(extract_scene(scene_name, scene, region, include_unsearched))
 
     return contents

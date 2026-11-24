@@ -49,7 +49,7 @@ is a spoiler, so it is off by default.
 
 | Column | Meaning |
 |---|---|
-| `region`, `location` | Where the item is. `region` is blank when it cannot be determined. Region names are the game's own, so the region around the town of Milton is `Mountain Town` |
+| `region`, `location` | Where the item is. Region names are the game's own, so the region around the town of Milton is `Mountain Town`. A zone that joins two regions has no region in the game, so it shows its own name: `Ravine`, `Crumbling Highway`, `Cinder Hills Coal Mine`, `No. 3 Coal Mine`. A building that the game uses in several regions, such as a trailer, gets the region of the outdoor zone whose door leads to it. `region` is blank for what you carry, and when the region cannot be determined |
 | `location_type` | `player_inventory`, `floor`, `scripted` (placed by the game, not interactive yet), `container`, `container_unsearched` |
 | `container` | Container name, for items in containers |
 | `category`, `subcategory` | From `tld_taxonomy.py`. `Unknown` means the prefab is not in the table |
@@ -358,8 +358,11 @@ skipped there.
 
 ## Known gaps
 
-- `region` stays blank for the two mine transition zones and for reused interiors
-  (such as `TrailerC`) in a save that has visited more than one region.
+- `region` stays blank for a scene the reader's table does not know, and for a reused
+  interior (such as `TrailerC`) that no door of an outdoor zone leads to, in a save that
+  has visited more than one region. No save checked so far has either.
+- The names of the two mines that join regions come from the game's wiki, not from the
+  game's own text.
 - The reader does not work out the weight the game shows for what you carry. It reports the
   stored weight of each item (`unit_weight_kg`), which leaves out liquid, the part of a food
   item already eaten, and wet clothing.
