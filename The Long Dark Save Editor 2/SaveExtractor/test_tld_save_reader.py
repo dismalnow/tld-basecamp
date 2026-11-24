@@ -1,4 +1,4 @@
-r"""Tests for where tld_save_reader.py writes its CSV.
+r"""Tests for tld_save_reader.py: where it writes its CSV, and its region labels.
 
 Run from this folder:
     python -m unittest -v
@@ -43,6 +43,25 @@ def small_save(matches: str = "23") -> bytes:
             "global": {"m_Inventory_Serialized": NestedJson(inventory)},
         },
     }
+    return codec.encode_save(DecodedSave(slot))
+
+
+def town_save() -> bytes:
+    """A save with matches in the inventory, on the ground in Mountain Town, and in its post office."""
+    def scene_with_matches(x: str, y: str, z: str) -> Dict[str, JsonValue]:
+        gear: Dict[str, JsonValue] = {
+            "m_Position": [Number(x), Number(y), Number(z)],
+            "m_NormalizedCondition": Number("1.0"),
+        }
+        items: Dict[str, JsonValue] = {
+            "m_SerializedItems": [{"m_PrefabName": "GEAR_WoodMatches", "m_SearializedGear": NestedJson(gear)}]}
+        return {"m_GearManagerSerialized": NestedJson(items)}
+
+    slot = codec.decode_save(small_save()).slot
+    entries = slot["m_Dict"]
+    assert isinstance(entries, dict)
+    entries["MountainTownRegion"] = scene_with_matches("444", "10", "716")
+    entries["PostOfficeA"] = scene_with_matches("1", "2", "3")
     return codec.encode_save(DecodedSave(slot))
 
 
@@ -202,6 +221,61 @@ class CsvCommandTests(ReaderCase):
         self.assertIn("The CSV goes to TLD-save-reports in your home folder", out)
 
 
+# The game's own region names: RegionsWithMap_* in Properties\Resources.resx of the C# editor.
+GAME_REGION_LABELS = {
+    "CoastalRegion": "Coastal Highway",
+    "LakeRegion": "Mystery Lake",
+    "WhalingStationRegion": "Desolation Point",
+    "RuralRegion": "Pleasant Valley",
+    "CrashMountainRegion": "Timberwolf Mountain",
+    "MarshRegion": "Forlorn Muskeg",
+    "RavineTransitionZone": "Ravine",
+    "HighwayTransitionZone": "Crumbling Highway",
+    "MountainTownRegion": "Mountain Town",
+    "TracksRegion": "Broken Railroad",
+    "RiverValleyRegion": "Hushed River Valley",
+    "CanneryRegion": "Bleak Inlet",
+    "AshCanyonRegion": "Ash Canyon",
+}
+TOWN_INTERIORS = ("BankA", "ChurchB", "ConvenienceStoreA", "FarmHouseB", "GreyMothersHouseA", "MiltonHouse",
+                  "PostOfficeA")
+
+
+class RegionLabelTests(unittest.TestCase):
+    def test_outdoor_zones_carry_the_games_labels(self) -> None:
+        for zone, label in GAME_REGION_LABELS.items():
+            with self.subTest(zone=zone):
+                self.assertEqual(reader.region_for_scene(zone, [zone]), label)
+
+    def test_the_region_around_milton_is_mountain_town(self) -> None:
+        self.assertEqual(reader.region_for_scene("MountainTownRegion", ["MountainTownRegion"]), "Mountain Town")
+
+    def test_interiors_of_the_town_are_in_mountain_town(self) -> None:
+        for scene in TOWN_INTERIORS:
+            with self.subTest(scene=scene):
+                self.assertEqual(reader.region_for_scene(scene, ["LakeRegion", "MountainTownRegion"]),
+                                 "Mountain Town")
+
+    def test_no_region_is_labeled_milton(self) -> None:
+        self.assertNotIn("Milton", set(reader.SCENE_TO_REGION.values()))
+
+    def test_landmarks_still_name_the_town(self) -> None:
+        names = [landmark[0] for landmark in reader.REGION_LANDMARKS["MountainTownRegion"]]
+        self.assertIn("Milton (Lower Town)", names)
+
+
+class RegionCsvTests(ReaderCase):
+    def test_the_csv_names_the_region_mountain_town(self) -> None:
+        self.save.write_bytes(town_save())
+        code, _, _ = self.run_reader(str(self.save), "--csv")
+        self.assertEqual(code, 0)
+        rows = rows_of(self.reports / "sandbox15.csv")[1:]
+        region, location = reader.HEADERS.index("region"), reader.HEADERS.index("location")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(sorted(row[region] for row in rows), ["", "Mountain Town", "Mountain Town"])
+        self.assertIn("Near Milton (Lower Town)", [row[location] for row in rows])
+
+
 def real_saves() -> Sequence[Path]:
     folder = os.environ.get("TLD_SAVE_DIR")
     return codec.find_saves(Path(folder)) if folder else []
@@ -221,6 +295,12 @@ class RealSaveTests(ReaderCase):
                 self.assertEqual(rows[0], reader.HEADERS)
                 self.assertEqual(len(rows) - 1, expected)
         self.assertEqual(sorted(path.name for path in folder.iterdir()), before)
+
+    def test_no_real_save_reports_a_region_named_milton(self) -> None:
+        for save in real_saves():
+            with self.subTest(save=save.name):
+                regions = {record.region for record in reader.read_save(save).records}
+                self.assertNotIn("Milton", regions)
 
 
 if __name__ == "__main__":

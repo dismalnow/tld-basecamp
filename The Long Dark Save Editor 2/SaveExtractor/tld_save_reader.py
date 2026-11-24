@@ -72,7 +72,7 @@ def _decompress(data: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 # TLD Location Database — derived from save file coordinate analysis
 # Coverage status:
-#   Full (from saves):   Mystery Lake, Coastal Highway, Pleasant Valley, Milton
+#   Full (from saves):   Mystery Lake, Coastal Highway, Pleasant Valley, Mountain Town
 #   Partial (from saves): Ravine, Highway Transition
 #   Stub (no save data): Timberwolf Mtn, Desolation Point, Forlorn Muskeg,
 #                        Ash Canyon, Blackrock, Bleak Inlet
@@ -142,7 +142,8 @@ SCENE_DISPLAY_NAMES = {
 
 # Region shown for each scene. The longest matching prefix of the scene key wins.
 # Outdoor zone names follow Properties/Resources.resx (RegionsWithMap_*) in this
-# repository, except MountainTownRegion, which this tool has always called Milton.
+# repository. MountainTownRegion is "Mountain Town", the game's own label. Milton is
+# the town inside that region, and it keeps its name in the landmarks further down.
 # Interior entries come from the original table and from what real saves show.
 # region_for_scene() keeps one only when that region's zone is in the same save.
 SCENE_TO_REGION = {
@@ -153,7 +154,7 @@ SCENE_TO_REGION = {
     "MarshRegion":           "Forlorn Muskeg",
     "WhalingStation":        "Desolation Point",
     "CrashMountain":         "Timberwolf Mountain",
-    "MountainTown":          "Milton",
+    "MountainTown":          "Mountain Town",
     "TracksRegion":          "Broken Railroad",
     "RiverValleyRegion":     "Hushed River Valley",
     "CanneryRegion":         "Bleak Inlet",
@@ -181,14 +182,14 @@ SCENE_TO_REGION = {
     # Timberwolf Mountain
     "MountainCaveA":         "Timberwolf Mountain",
     "BlackrockCaveA":        "Timberwolf Mountain",
-    # Milton
-    "BankA":                 "Milton",
-    "ChurchB":               "Milton",
-    "ConvenienceStoreA":     "Milton",
-    "FarmHouseB":            "Milton",
-    "GreyMothersHouseA":     "Milton",
-    "MiltonHouse":           "Milton",
-    "PostOfficeA":           "Milton",
+    # Mountain Town (the town of Milton)
+    "BankA":                 "Mountain Town",
+    "ChurchB":               "Mountain Town",
+    "ConvenienceStoreA":     "Mountain Town",
+    "FarmHouseB":            "Mountain Town",
+    "GreyMothersHouseA":     "Mountain Town",
+    "MiltonHouse":           "Mountain Town",
+    "PostOfficeA":           "Mountain Town",
     # Broken Railroad
     "MaintenanceShedA":      "Broken Railroad",
     # Desolation Point
