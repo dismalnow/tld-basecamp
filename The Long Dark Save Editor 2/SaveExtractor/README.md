@@ -8,7 +8,7 @@ except the wiki helper, which needs the `requests` package.
 | File | What it does |
 |---|---|
 | `tld_save_reader.py` | Lists every item in a save, as a summary or a CSV |
-| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, and its region labels |
+| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, and how it decompresses |
 | `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, and where the prefab comes from |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
 | `tld_wiki_updater.py` | Lists items on the game's wiki that the item table does not cover. Needs internet access and the `requests` package |

@@ -1,4 +1,4 @@
-r"""Tests for tld_save_reader.py: where it writes its CSV, and its region labels.
+r"""Tests for tld_save_reader.py: where it writes its CSV, its region labels, and how it decompresses.
 
 Run from this folder:
     python -m unittest -v
@@ -13,9 +13,11 @@ folder:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import csv
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -274,6 +276,55 @@ class RegionCsvTests(ReaderCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(sorted(row[region] for row in rows), ["", "Mountain Town", "Mountain Town"])
         self.assertIn("Near Milton (Lower Town)", [row[location] for row in rows])
+
+
+class DecompressionTests(unittest.TestCase):
+    """The reader decompresses with tld_save_codec.py and keeps no decompressor of its own."""
+
+    PLAIN = b"plain text with no repeats: 0123456789"
+
+    def test_the_decompressor_is_the_one_of_the_codec(self) -> None:
+        self.assertIs(reader.lzf_decompress, codec.lzf_decompress)
+        self.assertFalse(hasattr(reader, "_lzf_decompress"))
+
+    def test_packed_data_comes_back_as_it_went_in(self) -> None:
+        for plain in (self.PLAIN, b"abc" * 500, b""):
+            with self.subTest(length=len(plain)):
+                self.assertEqual(reader._decompress(codec.lzf_compress(plain)), plain)
+
+    def test_one_stray_byte_in_front_is_skipped(self) -> None:
+        # 0x20 asks for a copy of earlier output when there is none yet, so the first try fails at once.
+        self.assertEqual(reader._decompress(b"\x20" + codec.lzf_compress(self.PLAIN)), self.PLAIN)
+
+    def test_data_that_is_cut_off_is_refused(self) -> None:
+        with self.assertRaises(ValueError) as stop:
+            reader._decompress(codec.lzf_compress(self.PLAIN)[:-5])
+        self.assertEqual(str(stop.exception), "LZF decompression failed")
+
+    def test_a_stray_byte_after_the_end_is_refused(self) -> None:
+        with self.assertRaises(ValueError) as stop:
+            reader._decompress(codec.lzf_compress(self.PLAIN) + b"\x00")
+        self.assertEqual(str(stop.exception), "LZF decompression failed")
+
+
+class DamagedSaveTests(ReaderCase):
+    def test_a_save_that_is_cut_off_is_refused(self) -> None:
+        self.save.write_bytes(small_save()[:-7])
+        code, out, _ = self.run_reader(str(self.save))
+        self.assertTrue(str(code).startswith(f"Could not read {self.save}: "), code)
+        self.assertEqual(out, "")
+
+    def test_a_scene_that_cannot_be_decoded_is_named_and_the_rest_is_read(self) -> None:
+        slot = json.loads(codec.lzf_decompress(town_save()))
+        whole = base64.b64decode(slot["m_Dict"]["PostOfficeA"])
+        slot["m_Dict"]["PostOfficeA"] = base64.b64encode(whole[:-4]).decode("ascii")
+        self.save.write_bytes(codec.lzf_compress(json.dumps(slot).encode("utf-8")))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            contents = reader.read_save(self.save)
+        self.assertEqual(contents.failed_scenes, ["PostOfficeA"])
+        self.assertEqual(len(contents.records), 2)          # the inventory, and the ground in Mountain Town
+        self.assertIn("could not decode scene 'PostOfficeA'", errors.getvalue())
 
 
 def real_saves() -> Sequence[Path]:
