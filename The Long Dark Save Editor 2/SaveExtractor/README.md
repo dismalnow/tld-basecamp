@@ -2,21 +2,22 @@
 
 Python tools for The Long Dark survival saves (game v2.44 and later). One tool here changes
 a save file, `tld_save_apply.py`, and only after a checked backup. The readers only read,
-and the editor writes its result to a new file. Standard library only, Python 3.9 or newer.
+and the editor writes its result to a new file. Python 3.9 or newer. Standard library only,
+except the wiki helper, which needs the `requests` package.
 
 | File | What it does |
 |---|---|
 | `tld_save_reader.py` | Lists every item in a save, as a summary or a CSV |
 | `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, and where the prefab comes from |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
+| `tld_wiki_updater.py` | Lists items on the game's wiki that the item table does not cover. Needs internet access and the `requests` package |
+| `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
 | `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, or the condition of an inventory item |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
-
-The wiki helper lives in `..\tld_mediawiki_api\tld_wiki_updater.py`.
 
 Run the commands below from this folder. From anywhere else, put this folder's full
 path in front of the script name, or Python will not find the script.
@@ -275,6 +276,26 @@ The catalogs are the authoritative list of game items. Saves add the items that 
 define. Add each missing name to `TAXONOMY_LOOKUP`, and to `DLC_PREFABS` or `MOD_PREFABS`
 when it is not a base game item.
 
+### Compare with the wiki
+
+`tld_wiki_updater.py` fetches the item lists from the game's Fandom wiki and reports the
+wiki items that the item table does not cover. It needs internet access and the
+`requests` package (`pip install requests`). It does not change `tld_taxonomy.py`.
+
+```powershell
+python tld_wiki_updater.py
+python tld_wiki_updater.py --save "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox1"
+python tld_wiki_updater.py --patch
+```
+
+`--save` also lists the prefabs in that save that the item table lacks. `--patch` writes
+the report to `missing_prefabs.json` in this folder. When a wiki category cannot be
+fetched, the run exits with 1 and leaves `missing_prefabs.json` as it is.
+
+The wiki ranks last as a source of item names, after the game's catalogs, real saves and
+`ItemDictionary.cs`. Wiki pages use display names, so check a new name against a real save
+before adding it to the helper's name table.
+
 ## Where the item table comes from
 
 Checked on 2026-11-16 against game v2.60 (changelist 189457):
@@ -313,6 +334,7 @@ repository, `Helpers\CLZF.cs`.
 - `region` stays blank for the two mine transition zones and for reused interiors
   (such as `TrailerC`) in a save that has visited more than one region.
 - Water is reported as one stack. The volume is not read.
+- The wiki helper has no automated tests.
 - Saves from before 2018 use a different format and are not supported.
 - No save checked so far contains text outside plain ASCII. If the game writes such text
   in a form `tld_save_codec.py` does not reproduce, `verify` reports `FAILED` for that save.

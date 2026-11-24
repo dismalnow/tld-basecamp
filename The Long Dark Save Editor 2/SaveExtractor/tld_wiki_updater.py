@@ -7,8 +7,8 @@ Run this from your local machine (requires internet access to fandom.com).
 It does not modify tld_taxonomy.py. It prints a report so you can decide how to
 classify what is missing.
 
-tld_taxonomy.py is looked for next to this script and then in ../SaveExtractor.
-Use --taxonomy to point at it directly. The run stops if it cannot be loaded.
+tld_taxonomy.py is looked for next to this script. Use --taxonomy to point at
+another copy. The run stops if it cannot be loaded.
 
 Usage:
     python tld_wiki_updater.py                      # report only
@@ -270,13 +270,12 @@ def fetch_category_members(category: str, session: "requests.Session") -> list[s
 
 
 def find_taxonomy(explicit: "Path | None") -> Path:
-    """Path of tld_taxonomy.py: the --taxonomy argument, this folder, or ../SaveExtractor."""
+    """Path of tld_taxonomy.py: the --taxonomy argument, or the copy next to this script."""
     script_dir = Path(__file__).resolve().parent
     if explicit is not None:
         candidates = [explicit]
     else:
-        candidates = [script_dir / "tld_taxonomy.py",
-                      script_dir.parent / "SaveExtractor" / "tld_taxonomy.py"]
+        candidates = [script_dir / "tld_taxonomy.py"]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -323,7 +322,7 @@ def main() -> None:
     parser.add_argument("--patch", action="store_true",
                         help="Write missing items to missing_prefabs.json")
     parser.add_argument("--taxonomy", type=Path,
-                        help="Path to tld_taxonomy.py (default: next to this script, then ../SaveExtractor)")
+                        help="Path to tld_taxonomy.py (default: next to this script)")
     args = parser.parse_args()
 
     # Wiki titles can hold characters the Windows console code page lacks. Without this,
