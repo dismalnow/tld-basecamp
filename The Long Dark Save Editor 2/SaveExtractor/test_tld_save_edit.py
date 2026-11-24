@@ -27,7 +27,7 @@ from unittest import mock
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import EditError, Stack
+from tld_save_edit import EditError, Item, Stack
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -81,6 +81,170 @@ def entry_table(save_bytes: bytes) -> Dict[str, str]:
 def count_path(entry: int) -> str:
     return (f"m_Dict > global > m_Inventory_Serialized > m_SerializedItems[{entry}] > m_SerializedGear > "
             "m_StackableItemSerialized > m_UnitsProxy")
+
+
+def with_condition(items: Sequence[ItemSpec], entry: int, condition: str) -> List[ItemSpec]:
+    changed = list(items)
+    changed[entry] = (changed[entry][0], changed[entry][1], condition)
+    return changed
+
+
+def condition_path(entry: int) -> str:
+    return (f"m_Dict > global > m_Inventory_Serialized > m_SerializedItems[{entry}] > m_SerializedGear > "
+            "m_NormalizedCondition")
+
+
+def doctored_save(change) -> bytes:
+    """The default save after change(list of inventory items) has altered it."""
+    save = codec.decode_save(build_save())
+    change(save.entries["global"]["m_Inventory_Serialized"].value["m_SerializedItems"])
+    return codec.encode_save(save)
+
+
+class ItemListTests(unittest.TestCase):
+    def test_lists_every_item_in_save_order(self) -> None:
+        items = edit.list_items(codec.decode_save(build_save()))
+        self.assertEqual(items, [
+            Item(0, "GEAR_WoodMatches", 23, 100.0),
+            Item(1, "GEAR_Hatchet", None, 75.0),
+            Item(2, "GEAR_BottleAntibiotics", 6, 50.0),
+            Item(3, "GEAR_BottleAntibiotics", 12, 25.0),
+            Item(4, "GEAR_Stick", 122, 100.0),
+        ])
+
+
+class ConditionLiteralTests(unittest.TestCase):
+    def test_percent_becomes_a_fraction_in_the_game_s_form(self) -> None:
+        cases = {100: "1.0", 75: "0.75", 62.5: "0.625", 33.3: "0.333", 1: "0.01", 85.6: "0.856",
+                 99.99: "0.9999", 12.345678: "0.123456784"}
+        for percent, literal in cases.items():
+            with self.subTest(percent):
+                self.assertEqual(edit.condition_literal(percent), literal)
+
+    def test_floats_are_written_with_seven_digits_or_nine(self) -> None:
+        # Literals copied from real saves. Each must come back exactly as the game wrote it.
+        for literal in ("1.0", "0.856", "0.9206942", "0.9859133", "0.953999341", "0.200000077",
+                        "0.698802352", "0.03829546", "0.650164545", "0.767226", "0.5"):
+            with self.subTest(literal):
+                self.assertEqual(edit.float32_literal(float(literal)), literal)
+
+
+class SetConditionTests(unittest.TestCase):
+    def test_changes_exactly_one_value(self) -> None:
+        original = build_save()
+        result = edit.set_item_condition(original, "GEAR_Hatchet", 100)
+        self.assertEqual((result.prefab, result.entry, result.old_condition, result.new_condition),
+                         ("GEAR_Hatchet", 1, "0.75", "1.0"))
+        # Built independently, with the one condition changed.
+        self.assertEqual(result.data, build_save(with_condition(DEFAULT_ITEMS, 1, "1.0")))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(condition_path(1), "0.75", "1.0")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_a_stack_keeps_its_count(self) -> None:
+        result = edit.set_item_condition(build_save(), "GEAR_WoodMatches", 42.5)
+        self.assertEqual(edit.list_items(codec.decode_save(result.data))[0],
+                         Item(0, "GEAR_WoodMatches", 23, 42.5))
+
+    def test_an_entry_number_picks_one_of_several(self) -> None:
+        result = edit.set_item_condition(build_save(), "GEAR_BottleAntibiotics", 90, entry=3)
+        self.assertEqual((result.entry, result.old_condition, result.new_condition), (3, "0.25", "0.9"))
+        self.assertEqual(result.data, build_save(with_condition(DEFAULT_ITEMS, 3, "0.9")))
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = build_save()
+        copy = bytes(original)
+        edit.set_item_condition(original, "GEAR_Hatchet", 100)
+        self.assertEqual(original, copy)
+
+    def test_requests_that_do_not_name_exactly_one_item_are_refused(self) -> None:
+        several = ("holds 2 entries of GEAR_BottleAntibiotics: entry 2 (condition 50.0%), "
+                   "entry 3 (condition 25.0%). Add --entry to say which one")
+        cases = {
+            "several of the item and no entry number": (("GEAR_BottleAntibiotics", 90, None), several),
+            "a name that is close": (("GEAR_Hatchett", 90, None), "Did you mean GEAR_Hatchet?"),
+            "a name that is nothing like": (("GEAR_Zzzzzzzz", 90, None), "Run items to see the item names"),
+            "an entry number past the end": (("GEAR_Stick", 90, 99), "Entries run from 0 to 4"),
+            "a negative entry number": (("GEAR_Stick", 90, -1), "there is no inventory entry -1"),
+            "an entry number for another item": (("GEAR_Stick", 90, 1), "inventory entry 1 is GEAR_Hatchet, "
+                                                                        "not GEAR_Stick. Run items again"),
+            "the condition it already has": (("GEAR_Hatchet", 75, None), "already has a condition of 75%"),
+            "a condition of zero": (("GEAR_Hatchet", 0, None), "from 1 to 100"),
+            "a condition below the range": (("GEAR_Hatchet", 0.5, None), "from 1 to 100"),
+            "a negative condition": (("GEAR_Hatchet", -5, None), "from 1 to 100"),
+            "a condition above 100": (("GEAR_Hatchet", 100.5, None), "from 1 to 100"),
+            "a condition that is not a number": (("GEAR_Hatchet", float("nan"), None), "from 1 to 100"),
+        }
+        original = build_save()
+        for name, ((prefab, percent, entry), message) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(EditError) as caught:
+                    edit.set_item_condition(original, prefab, percent, entry)
+                self.assertIn(message, str(caught.exception))
+
+    def test_ruined_items_are_refused(self) -> None:
+        def worn_out(items) -> None:
+            items[1]["m_SerializedGear"].value["m_WornOut"] = True
+
+        cases = {"condition 0": build_save(with_condition(DEFAULT_ITEMS, 1, "0.0")),
+                 "marked worn out": doctored_save(worn_out)}
+        for name, save in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(EditError) as caught:
+                    edit.set_item_condition(save, "GEAR_Hatchet", 100)
+                self.assertIn("inventory entry 1 (GEAR_Hatchet) is ruined", str(caught.exception))
+
+    def test_a_condition_in_an_unknown_form_is_refused(self) -> None:
+        def no_condition(items) -> None:
+            del items[1]["m_SerializedGear"].value["m_NormalizedCondition"]
+
+        def text_condition(items) -> None:
+            items[1]["m_SerializedGear"].value["m_NormalizedCondition"] = "0.75"
+
+        def plain_gear(items) -> None:
+            items[1]["m_SerializedGear"] = None
+
+        cases = {"above 1": build_save(with_condition(DEFAULT_ITEMS, 1, "75.0")),
+                 "negative": build_save(with_condition(DEFAULT_ITEMS, 1, "-0.5")),
+                 "exponent form": build_save(with_condition(DEFAULT_ITEMS, 1, "7.5E-01")),
+                 "not a number": build_save(with_condition(DEFAULT_ITEMS, 1, "NaN")),
+                 "missing": doctored_save(no_condition),
+                 "text": doctored_save(text_condition),
+                 "no gear record": doctored_save(plain_gear)}
+        for name, save in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(EditError) as caught:
+                    edit.set_item_condition(save, "GEAR_Hatchet", 100)
+                self.assertIn("is not stored the way this tool expects", str(caught.exception))
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as caught:
+            edit.set_item_condition(b"\xff\xff\xff", "GEAR_Hatchet", 100)
+        self.assertIn("does not pass the exact rebuild check", str(caught.exception))
+
+    def test_an_edit_that_writes_the_wrong_value_is_caught(self) -> None:
+        # Fault injection: the encoder hands back a save with 0.5 where 1.0 was asked for.
+        original = build_save()
+        wrong = build_save(with_condition(DEFAULT_ITEMS, 1, "0.5"))
+        real_encode = codec.encode_save
+
+        def encode_wrongly(save: DecodedSave) -> bytes:
+            encoded = real_encode(save)
+            return encoded if encoded in (original, wrong) else wrong
+
+        with mock.patch.object(codec, "encode_save", side_effect=encode_wrongly):
+            with self.assertRaises(EditError) as caught:
+                edit.set_item_condition(original, "GEAR_Hatchet", 100)
+        self.assertIn("did not change exactly the one value asked for", str(caught.exception))
+        self.assertIn("0.75 -> 0.5", str(caught.exception))
+
+    def test_an_edit_that_also_changes_the_count_is_caught(self) -> None:
+        original = build_save()
+        both = build_save(with_count(with_condition(DEFAULT_ITEMS, 0, "0.5"), 0, "24"))
+        with self.assertRaises(EditError) as caught:
+            edit._prove_single_change(original, both, (condition_path(0), "1.0", "0.5"))
+        self.assertIn("m_UnitsProxy: 23 -> 24", str(caught.exception))
 
 
 class StackListTests(unittest.TestCase):
@@ -398,6 +562,67 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(lines[5], "4 stacks among 5 inventory items in sandbox15.")
         self.assertEqual(err, "")
 
+    def test_items_lists_everything(self) -> None:
+        code, out, err = self.run_command("items", str(self.save))
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split(), ["entry", "item", "count", "condition"])
+        self.assertEqual([line.split() for line in lines[1:6]], [
+            ["0", "GEAR_WoodMatches", "23", "100.0%"],
+            ["1", "GEAR_Hatchet", "75.0%"],
+            ["2", "GEAR_BottleAntibiotics", "6", "50.0%"],
+            ["3", "GEAR_BottleAntibiotics", "12", "25.0%"],
+            ["4", "GEAR_Stick", "122", "100.0%"],
+        ])
+        self.assertEqual(lines[6], "5 inventory items in sandbox15.")
+        self.assertEqual(err, "")
+
+    def test_set_condition_writes_the_edited_save_to_a_new_file(self) -> None:
+        before = self.snapshot()
+        code, out, err = self.run_command("set-condition", str(self.save), "--item", "GEAR_Hatchet",
+                                          "--condition", "100", "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), build_save(with_condition(DEFAULT_ITEMS, 1, "1.0")))
+        self.assertIn("GEAR_Hatchet, inventory entry 1", out)
+        self.assertIn("condition 75.0% -> 100.0% (stored as 0.75 -> 1.0)", out)
+        self.assertIn("differs from the original in exactly this one value", out)
+        self.assertIn("2 of 3 entries are byte for byte unchanged", out)
+        self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_set_condition_with_an_entry_number_and_a_fraction_of_a_percent(self) -> None:
+        code, out, _ = self.run_command("set-condition", str(self.save), "--item", "GEAR_BottleAntibiotics",
+                                        "--entry", "2", "--condition", "62.5", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.out.read_bytes(), build_save(with_condition(DEFAULT_ITEMS, 2, "0.625")))
+
+    def test_set_condition_refusals_write_nothing(self) -> None:
+        hatchet = ["--item", "GEAR_Hatchet", "--condition", "100"]
+        cases = {
+            "several of the item": (["--item", "GEAR_BottleAntibiotics", "--condition", "90", "--out",
+                                     str(self.out)], "Add --entry to say which one"),
+            "unknown item": (["--item", "GEAR_Nope", "--condition", "90", "--out", str(self.out)],
+                             "there is no GEAR_Nope in the inventory"),
+            "same condition": (["--item", "GEAR_Hatchet", "--condition", "75", "--out", str(self.out)],
+                               "already has a condition of 75%"),
+            "condition too high": (["--item", "GEAR_Hatchet", "--condition", "101", "--out", str(self.out)],
+                                   "from 1 to 100"),
+            "output is the save itself": (hatchet + ["--out", str(self.save)], "is named like a live save"),
+            "output folder missing": (hatchet + ["--out", str(self.folder / "nowhere" / "x.edited")],
+                                      "does not exist"),
+        }
+        before = self.snapshot()
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                code, out, err = self.run_command("set-condition", str(self.save), *options)
+                self.assertEqual(code, 1)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+
     def test_set_count_writes_the_edited_save_to_a_new_file(self) -> None:
         before = self.snapshot()
         code, out, err = self.run_command("set-count", str(self.save), "--item", "GEAR_WoodMatches",
@@ -523,6 +748,37 @@ class RealSaveTests(unittest.TestCase):
                 expected = [Stack(stack.entry, stack.prefab, new_count if stack.entry == target.entry
                                   else stack.count, stack.condition) for stack in before]
                 self.assertEqual(after, expected)
+
+    def test_one_condition_can_be_changed_in_every_real_save(self) -> None:
+        """In memory only. No file is written."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.list_items(codec.decode_save(original))
+                target = next((item for item in before if item.condition and item.condition != 50.0), None)
+                if target is None:
+                    continue
+                result = edit.set_item_condition(original, target.prefab, 50, entry=target.entry)
+                self.assertEqual(result.new_condition, "0.5")
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                after = edit.list_items(codec.decode_save(result.data))
+                expected = [Item(item.entry, item.prefab, item.count, 50.0 if item.entry == target.entry
+                                 else item.condition) for item in before]
+                self.assertEqual(after, expected)
+
+    def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        for path in codec.find_saves(folder):
+            save = codec.decode_save(path.read_bytes())
+            for entry, item in enumerate(edit._inventory_items(save)):
+                literal = item["m_SerializedGear"].value["m_NormalizedCondition"].literal
+                if float(literal) >= 0.0001:
+                    with self.subTest(save=path.name, entry=entry):
+                        self.assertEqual(edit.float32_literal(float(literal)), literal)
 
 
 if __name__ == "__main__":

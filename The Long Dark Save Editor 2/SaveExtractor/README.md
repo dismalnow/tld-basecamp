@@ -11,7 +11,7 @@ Standard library only, Python 3.9 or newer.
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file. For now: the count of an inventory stack |
+| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, or the condition of an inventory item |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 
 The wiki helper lives in `..\tld_mediawiki_api\tld_wiki_updater.py`.
@@ -87,11 +87,13 @@ A document that cannot be written back identically is refused. Nothing is change
 Checked on 2026-11-20: 15 of 15 real saves rebuild byte for byte. They span game
 changelists 157357 to 189457 (v2.60).
 
-## Change the count of a stack
+## Change a count or a condition
 
 `tld_save_edit.py` changes one value in a save and writes the result to a new file. The
-save you name is only read. For now it does one thing: it sets the count of a stack in the
-player's inventory.
+save you name is only read. It can set the count of a stack in the player's inventory, or
+the condition of an item in the player's inventory.
+
+### Count
 
 ```powershell
 $save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox15"
@@ -113,6 +115,33 @@ SHA-256:  dd9ac33a4768c7e57526981128d245876b97c279078c0b0f4be79f1f3aacb31d
 sandbox15 itself was not changed.
 ```
 
+### Condition
+
+```powershell
+python tld_save_edit.py items $save
+python tld_save_edit.py set-condition $save --item GEAR_WoolSocks --condition 100 --out "$env:TEMP\sandbox15.edited"
+```
+
+`items` lists everything in the inventory, stacks or not, with the same columns as
+`stacks`. The condition is in percent, from 1 to 100, and may have decimals (`62.5`). For
+a stack it applies to the whole stack. When the inventory holds more than one of an item,
+add `--entry` with the number from that list.
+
+```text
+Save:     sandbox15, 587,364 bytes, passes the exact rebuild check
+Item:     GEAR_WoolSocks, inventory entry 15
+Change:   condition 70.0% -> 100.0% (stored as 0.699579835 -> 1.0)
+Checked:  the edited save differs from the original in exactly this one value
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 587,355 bytes
+SHA-256:  9951f85a39865fa1c54bf244eb8bb80973c2140d7885a9b610860cc39bc1eaca
+sandbox15 itself was not changed.
+```
+
+A ruined item (condition 0) is refused: the game keeps more than the condition for it.
+
+### The checks
+
 Three checks stand between an edit and a written file. If one fails, nothing is left on disk.
 
 1. The original must pass `tld_save_codec.py verify`.
@@ -128,15 +157,31 @@ backup.
 Exit code 0 means done, 1 means refused with the reason printed, and 2 means the save was
 not found or an option was wrong.
 
-Two things to know about this edit:
+Things to know about these edits:
 
 - An item's stored weight does not change with its count (checked across 476 stacks in 16
   saves), so nothing else in the item record needs updating.
+- The condition is the fraction in `m_NormalizedCondition`, written the way the game
+  writes a 32-bit float (checked against all 1,224 inventory items in 15 saves). The item
+  record also holds hit points in `m_CurrentHPProxy`. This tool leaves that value alone,
+  as the C# editor's repair does. The game reads the condition when it loads a save and
+  works the hit points out again: in a save the C# editor wrote on 2026-11-09, eleven
+  items had the two values disagreeing. The game's next save held ten of them, each
+  with its condition kept and its hit points worked out again.
 - The C# editor sets the save's "cheats used" flag whenever it saves. This tool does not.
   It changes only the value you ask for.
 
 Checked on 2026-11-21: one count changed in each of 16 real saves, and the C# editor's own
 loader read every result back with exactly that one difference.
+
+Checked in the game (v2.60, changelist 189457) on a survival save:
+
+- 2026-11-21: Wood Matches set from 23 to 40. The game showed 40, and its own next save
+  still held 40.
+- 2026-11-22: Wool Socks set from 70% to 100%. The game showed 100%, and its own next
+  save held 100% with the hit points worked out again, from 52.5 to 75.0.
+
+Both of those saves, as the game wrote them, pass `verify`.
 
 ## Keep the item table current
 
@@ -182,8 +227,9 @@ $env:TLD_SAVE_DIR = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival"
 python -m unittest -v
 ```
 
-With `TLD_SAVE_DIR` set, the edit tests also change one count in each real save. That
-happens in memory only: no file is written. Allow a minute or two for the whole run.
+With `TLD_SAVE_DIR` set, the edit tests also change one count and one condition in each
+real save. That happens in memory only: no file is written. Allow a few minutes for the
+whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.

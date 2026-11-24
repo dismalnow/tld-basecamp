@@ -3,12 +3,15 @@
 tld_save_edit.py: change one value in a The Long Dark save and write the result to a new file.
 
 Usage:
+    python tld_save_edit.py items SAVE
     python tld_save_edit.py stacks SAVE
     python tld_save_edit.py set-count SAVE --item GEAR_NAME --count N --out NEW_FILE [--entry N]
+    python tld_save_edit.py set-condition SAVE --item GEAR_NAME --condition PERCENT --out NEW_FILE [--entry N]
 
-stacks lists the stacks in the player's inventory: entry number, item, count, condition.
-set-count changes the count of one stack. Add --entry when the inventory holds more than
-one stack of that item.
+items lists everything in the player's inventory: entry number, item, count, condition.
+stacks lists only the stacks. set-count changes the count of one stack. set-condition
+changes the condition of one item, or of one whole stack. Add --entry when the inventory
+holds more than one of that item.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -32,15 +35,20 @@ import difflib
 import hashlib
 import json
 import os
+import re
+import struct
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import tld_save_codec as codec
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
 
 MAX_COUNT = 9999
+MIN_CONDITION = 1.0      # percent
+MAX_CONDITION = 100.0    # percent
 
 Difference = Tuple[str, str, str]
 
@@ -109,6 +117,26 @@ def _condition_of(item: JsonValue) -> Optional[float]:
         return None
 
 
+@dataclass(frozen=True)
+class Item:
+    entry: int                    # position in the save's inventory list, starting at 0
+    prefab: str
+    count: Optional[int]          # None when the item is not a stack
+    condition: Optional[float]    # 0 to 100, or None when the save holds no usable value
+
+
+def list_items(save: DecodedSave) -> List[Item]:
+    """Everything in the player's inventory, in save order."""
+    found: List[Item] = []
+    for entry, item in enumerate(_inventory_items(save)):
+        prefab = _prefab_of(item)
+        if prefab is None:
+            continue
+        stack = _stack_of(item)
+        found.append(Item(entry, prefab, None if stack is None else stack[1], _condition_of(item)))
+    return found
+
+
 def list_stacks(save: DecodedSave) -> List[Stack]:
     """Every stack in the player's inventory, in save order."""
     stacks: List[Stack] = []
@@ -121,6 +149,23 @@ def list_stacks(save: DecodedSave) -> List[Stack]:
     return stacks
 
 
+def _item_at(items: List[JsonValue], prefab: str, entry: int, listing: str) -> JsonValue:
+    """The inventory entry with this number, once it is confirmed to be the named item."""
+    if not 0 <= entry < len(items):
+        raise EditError(f"there is no inventory entry {entry}. Entries run from 0 to {len(items) - 1}")
+    actual = _prefab_of(items[entry])
+    if actual != prefab:
+        raise EditError(f"inventory entry {entry} is {actual}, not {prefab}. Run {listing} again to see the "
+                        "current entry numbers")
+    return items[entry]
+
+
+def _no_such_item(prefab: str, names: Sequence[Optional[str]], listing: str) -> EditError:
+    close = difflib.get_close_matches(prefab, sorted({name for name in names if name}), n=3, cutoff=0.7)
+    hint = f" Did you mean {' or '.join(close)}?" if close else f" Run {listing} to see the item names."
+    return EditError(f"there is no {prefab} in the inventory.{hint}")
+
+
 def _select_stack(items: List[JsonValue], prefab: str,
                   entry: Optional[int]) -> Tuple[int, Dict[str, JsonValue], int]:
     """The one stack that is meant: its entry number, its stack record and its count.
@@ -128,22 +173,14 @@ def _select_stack(items: List[JsonValue], prefab: str,
     Raises EditError unless exactly one stack is meant.
     """
     if entry is not None:
-        if not 0 <= entry < len(items):
-            raise EditError(f"there is no inventory entry {entry}. Entries run from 0 to {len(items) - 1}")
-        actual = _prefab_of(items[entry])
-        if actual != prefab:
-            raise EditError(f"inventory entry {entry} is {actual}, not {prefab}. Run stacks again to see the "
-                            "current entry numbers")
-        found = _stack_of(items[entry])
+        found = _stack_of(_item_at(items, prefab, entry, "stacks"))
         if found is None:
             raise EditError(f"inventory entry {entry} ({prefab}) is not a stack, so it has no count to set")
         return entry, found[0], found[1]
     names = [_prefab_of(item) for item in items]
     if prefab not in names:
-        stack_names = sorted({name for name, item in zip(names, items) if name and _stack_of(item) is not None})
-        close = difflib.get_close_matches(prefab, stack_names, n=3, cutoff=0.7)
-        hint = f" Did you mean {' or '.join(close)}?" if close else " Run stacks to see the item names."
-        raise EditError(f"there is no {prefab} in the inventory.{hint}")
+        raise _no_such_item(prefab, [name for name, item in zip(names, items) if _stack_of(item) is not None],
+                            "stacks")
     stacks: List[Tuple[int, Tuple[Dict[str, JsonValue], int]]] = []
     for position, item in enumerate(items):
         found = _stack_of(item) if names[position] == prefab else None
@@ -157,6 +194,70 @@ def _select_stack(items: List[JsonValue], prefab: str,
                         "Add --entry to say which one")
     position, found = stacks[0]
     return position, found[0], found[1]
+
+
+def _select_item(items: List[JsonValue], prefab: str, entry: Optional[int]) -> Tuple[int, JsonValue]:
+    """The one inventory entry that is meant, with its entry number.
+
+    Raises EditError unless exactly one entry is meant.
+    """
+    if entry is not None:
+        return entry, _item_at(items, prefab, entry, "items")
+    positions = [position for position, item in enumerate(items) if _prefab_of(item) == prefab]
+    if not positions:
+        raise _no_such_item(prefab, [_prefab_of(item) for item in items], "items")
+    if len(positions) > 1:
+        def shown(position: int) -> str:
+            condition = _condition_of(items[position])
+            return f"entry {position}" + ("" if condition is None else f" (condition {condition:.1f}%)")
+        listing = ", ".join(shown(position) for position in positions[:8])
+        more = f" and {len(positions) - 8} more" if len(positions) > 8 else ""
+        raise EditError(f"the inventory holds {len(positions)} entries of {prefab}: {listing}{more}. "
+                        "Add --entry to say which one")
+    return positions[0], items[positions[0]]
+
+
+# ---------------------------------------------------------------------------
+# Condition as the game stores it
+# ---------------------------------------------------------------------------
+
+_PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def _as_float32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def float32_literal(value: float) -> str:
+    """A 32-bit float written the way the game writes it: 7 digits, or 9 when 7 do not give
+    the same float back. Meant for values from 0.0001 to 1, which need no exponent."""
+    target = _as_float32(value)
+    text = f"{target:.7g}"
+    if _as_float32(float(text)) != target:
+        text = f"{target:.9g}"
+    return text if "." in text else text + ".0"
+
+
+def condition_literal(percent: float) -> str:
+    """The stored form of a condition given in percent. The save holds a fraction of 1."""
+    return float32_literal(float(Decimal(repr(percent)) / 100))
+
+
+def _editable_condition(item: JsonValue, entry: int, prefab: str) -> Tuple[Dict[str, JsonValue], str]:
+    """The gear record of an inventory entry and its stored condition.
+
+    Raises EditError when the condition is missing, in an unknown form, or marks a ruined item.
+    """
+    gear = _gear_of(item)
+    value = gear.get("m_NormalizedCondition") if gear is not None else None
+    if gear is None or not isinstance(value, Number) or not _PLAIN_DECIMAL.fullmatch(value.literal) \
+            or float(value.literal) > 1:
+        raise EditError(f"the condition of inventory entry {entry} ({prefab}) is not stored the way this "
+                        "tool expects, so it is not changed")
+    if float(value.literal) == 0 or gear.get("m_WornOut") is True:
+        raise EditError(f"inventory entry {entry} ({prefab}) is ruined. The game keeps more than the condition "
+                        "for a ruined item, so this tool does not change it")
+    return gear, value.literal
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +304,17 @@ def differences(before: JsonValue, after: JsonValue, path: str = "") -> Iterator
         yield (path, _show(before), _show(after))
 
 
-def _count_path(entry: int) -> str:
+def _gear_path(entry: int, field: str) -> str:
     return (f"{codec.ENTRY_TABLE} > global > m_Inventory_Serialized > m_SerializedItems[{entry}] > "
-            "m_SerializedGear > m_StackableItemSerialized > m_UnitsProxy")
+            f"m_SerializedGear > {field}")
+
+
+def _count_path(entry: int) -> str:
+    return _gear_path(entry, "m_StackableItemSerialized > m_UnitsProxy")
+
+
+def _condition_path(entry: int) -> str:
+    return _gear_path(entry, "m_NormalizedCondition")
 
 
 def _prove_single_change(original: bytes, edited: bytes, expected: Difference) -> Tuple[int, int]:
@@ -266,6 +375,43 @@ def set_stack_count(original: bytes, prefab: str, count: int, entry: Optional[in
     expected = (_count_path(chosen), str(old_count), str(count))
     entries, unchanged = _prove_single_change(original, edited, expected)
     return CountEdit(edited, prefab, chosen, old_count, count, entries, unchanged)
+
+
+@dataclass(frozen=True)
+class ConditionEdit:
+    data: bytes               # the edited save
+    prefab: str
+    entry: int
+    old_condition: str        # as stored: a fraction of 1, for example 0.856
+    new_condition: str
+    entries: int              # entries in the save
+    unchanged_entries: int    # entries that are byte for byte the original
+
+
+def set_item_condition(original: bytes, prefab: str, percent: float,
+                       entry: Optional[int] = None) -> ConditionEdit:
+    """Return the save with the condition of one inventory entry changed. Reads and writes no file.
+
+    The condition is given in percent. For a stack it applies to the whole stack. Raises
+    EditError under the same rules as set_stack_count, and when the item is ruined.
+    """
+    if not MIN_CONDITION <= percent <= MAX_CONDITION:
+        raise EditError(f"the condition must be a number from {MIN_CONDITION:g} to {MAX_CONDITION:g} "
+                        f"(percent), not {percent:g}")
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    chosen, item = _select_item(_inventory_items(save), prefab, entry)
+    gear, old = _editable_condition(item, chosen, prefab)
+    new = condition_literal(percent)
+    if _as_float32(float(old)) == _as_float32(float(new)):
+        raise EditError(f"inventory entry {chosen} ({prefab}) already has a condition of "
+                        f"{float(old) * 100:g}%. Nothing to change")
+    gear["m_NormalizedCondition"] = Number(new)
+    edited = codec.encode_save(save)
+    entries, unchanged = _prove_single_change(original, edited, (_condition_path(chosen), old, new))
+    return ConditionEdit(edited, prefab, chosen, old, new, entries, unchanged)
 
 
 # ---------------------------------------------------------------------------
@@ -330,33 +476,48 @@ def _read_save(path: Path) -> Optional[bytes]:
         return None
 
 
-def _run_stacks(path: Path) -> int:
+def _run_list(path: Path, stacks_only: bool) -> int:
     data = _read_save(path)
     if data is None:
         return 2
     try:
         save = codec.decode_save(data)
-        stacks = list_stacks(save)
+        listed: Sequence[Union[Item, Stack]] = list_stacks(save) if stacks_only else list_items(save)
         total = len(_inventory_items(save))
     except (EditError, codec.SaveFormatError) as error:
         print(f"Refused: {error}", file=sys.stderr)
         return 1
-    width = max([len(stack.prefab) for stack in stacks] + [4])
+    width = max([len(row.prefab) for row in listed] + [4])
     print(f"{'entry':>5}  {'item':<{width}}  {'count':>5}  condition")
-    for stack in stacks:
-        condition = "" if stack.condition is None else f"{stack.condition:.1f}%"
-        print(f"{stack.entry:>5}  {stack.prefab:<{width}}  {stack.count:>5}  {condition:>9}")
-    print(f"{len(stacks)} stacks among {total} inventory items in {path.name}.")
+    for row in listed:
+        count = "" if row.count is None else str(row.count)
+        condition = "" if row.condition is None else f"{row.condition:.1f}%"
+        print(f"{row.entry:>5}  {row.prefab:<{width}}  {count:>5}  {condition:>9}".rstrip())
+    if stacks_only:
+        print(f"{len(listed)} stacks among {total} inventory items in {path.name}.")
+    else:
+        print(f"{len(listed)} inventory items in {path.name}.")
     return 0
 
 
-def _run_set_count(path: Path, prefab: str, count: int, entry: Optional[int], out: Path) -> int:
+def _percent(stored: str) -> str:
+    return f"{float(stored) * 100:.1f}%"
+
+
+def _run_edit(path: Path, out: Path, command: str, prefab: str, value: float, entry: Optional[int]) -> int:
     data = _read_save(path)
     if data is None:
         return 2
+    edit: Union[CountEdit, ConditionEdit]
     try:
         check_new_file_path(out)
-        edit = set_stack_count(data, prefab, count, entry)
+        if command == "set-count":
+            edit = set_stack_count(data, prefab, int(value), entry)
+            change = f"count {edit.old_count} -> {edit.new_count}"
+        else:
+            edit = set_item_condition(data, prefab, value, entry)
+            change = (f"condition {_percent(edit.old_condition)} -> {_percent(edit.new_condition)} "
+                      f"(stored as {edit.old_condition} -> {edit.new_condition})")
         write_new_file(out, edit.data)
     except (EditError, codec.SaveFormatError) as error:
         print(f"Refused: {error}", file=sys.stderr)
@@ -364,7 +525,7 @@ def _run_set_count(path: Path, prefab: str, count: int, entry: Optional[int], ou
         return 1
     print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
     print(f"Item:     {edit.prefab}, inventory entry {edit.entry}")
-    print(f"Change:   count {edit.old_count} -> {edit.new_count}")
+    print(f"Change:   {change}")
     print("Checked:  the edited save differs from the original in exactly this one value")
     print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
           "(all except global)")
@@ -380,16 +541,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python tld_save_edit.py stacks sandbox15
+  python tld_save_edit.py items sandbox15
   python tld_save_edit.py set-count sandbox15 --item GEAR_WoodMatches --count 40 --out sandbox15.edited
+  python tld_save_edit.py set-condition sandbox15 --item GEAR_Hatchet --condition 100 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
         """,
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
-    stacks = commands.add_parser("stacks", help="list the stacks in the player's inventory")
-    stacks.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
+    for name, text in (("items", "list everything in the player's inventory"),
+                       ("stacks", "list the stacks in the player's inventory")):
+        listing = commands.add_parser(name, help=text)
+        listing.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
     set_count = commands.add_parser("set-count", help="change the count of one inventory stack")
     set_count.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
     set_count.add_argument("--item", required=True, metavar="GEAR_NAME",
@@ -401,10 +565,25 @@ option was wrong.
                                 "stacks of the item")
     set_count.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                            help="the file to create. It must not exist yet")
+    set_condition = commands.add_parser("set-condition",
+                                        help="change the condition of one inventory item or stack")
+    set_condition.add_argument("save", type=Path, metavar="SAVE",
+                               help="the save file to read. It is not changed")
+    set_condition.add_argument("--item", required=True, metavar="GEAR_NAME",
+                               help="the item, as items prints it, for example GEAR_Hatchet")
+    set_condition.add_argument("--condition", required=True, type=float, metavar="PERCENT",
+                               help=f"the new condition in percent, from {MIN_CONDITION:g} "
+                                    f"to {MAX_CONDITION:g}")
+    set_condition.add_argument("--entry", type=int, metavar="N",
+                               help="the entry number from items. Needed when the inventory holds "
+                                    "more than one of the item")
+    set_condition.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                               help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
-    if args.command == "stacks":
-        return _run_stacks(args.save)
-    return _run_set_count(args.save, args.item, args.count, args.entry, args.out)
+    if args.command in ("items", "stacks"):
+        return _run_list(args.save, stacks_only=args.command == "stacks")
+    value = args.count if args.command == "set-count" else args.condition
+    return _run_edit(args.save, args.out, args.command, args.item, value, args.entry)
 
 
 if __name__ == "__main__":
