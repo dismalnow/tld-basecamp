@@ -82,7 +82,8 @@ Two things make an exact rebuild possible:
 - Numbers are kept exactly as the game wrote them. The game writes forms such as
   `6.204471E-05`, which Python's `json` module would write back as `6.204471e-05`.
 - The compressor is a port of `Helpers\CLZF.cs` in this repository. It produces the same
-  bytes as the game's own compressor.
+  bytes as the game's own compressor. The license notice of that file is reproduced in
+  `tld_save_codec.py`, next to the port.
 
 A document that cannot be written back identically is refused. Nothing is changed silently.
 
@@ -246,6 +247,14 @@ deletes or overwrites a backup.
 
 Exit code 0 means done, 1 means refused or stopped with the reason printed, and 2 means a
 file was not found or an option was wrong.
+
+Checked in the game (v2.60, changelist 189457) on 2026-11-24, on a survival save:
+
+- `apply` put an edit of Wood Matches from 40 to 50 in place. The game showed 50.
+- With the game running, `restore` refused and changed nothing.
+- With the game closed, `restore` backed up the game's newer save and put the earlier one
+  back. The game showed 40, and the save file was byte for byte the one from before the
+  test.
 
 ## Keep the item table current
 
