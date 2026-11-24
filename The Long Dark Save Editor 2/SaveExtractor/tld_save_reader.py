@@ -11,7 +11,8 @@ Usage:
 --out FILE writes the CSV to FILE.
 
 Item categories and the source column (base game, DLC, mod) come from
-tld_taxonomy.py, which must sit next to this file.
+tld_taxonomy.py. Decompression comes from tld_save_codec.py. Both must sit next
+to this file.
 The save file is only read, never written.
 """
 
@@ -27,38 +28,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from tld_save_codec import lzf_decompress
 from tld_taxonomy import TAXONOMY_LOOKUP, normalize_prefab, prefab_source
 
 
 # ---------------------------------------------------------------------------
-# Pure-Python LZF decompressor
+# Decompression
 # ---------------------------------------------------------------------------
 
-def _lzf_decompress(data: bytes) -> bytes:
-    out = bytearray()
-    i, n = 0, len(data)
-    while i < n:
-        ctrl = data[i]; i += 1
-        if ctrl < 32:
-            length = ctrl + 1
-            out += data[i:i + length]; i += length
-        else:
-            length = (ctrl >> 5) + 2
-            if length == 9: length += data[i]; i += 1
-            ref = ((ctrl & 0x1f) << 8) + data[i] + 1; i += 1
-            pos = len(out) - ref
-            if pos < 0:
-                raise ValueError(f"Invalid LZF back-reference at byte {i}")
-            for _ in range(length):
-                out.append(out[pos]); pos += 1
-    return bytes(out)
-
-
 def _decompress(data: bytes) -> bytes:
+    """Decompress one LZF layer of a save with the decompressor of tld_save_codec.py.
+
+    When the data does not decode from its first byte, one more try starts at the second
+    byte. That retry was here before this tool used the codec's decompressor, and it is
+    kept as it was. None of the saves checked so far needs it.
+    """
     for skip in (0, 1):
         try:
-            return _lzf_decompress(data[skip:])
-        except (ValueError, IndexError):
+            return lzf_decompress(data[skip:])
+        except ValueError:          # the codec's SaveFormatError is a ValueError
             pass
     raise ValueError("LZF decompression failed")
 
