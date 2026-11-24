@@ -8,6 +8,7 @@ except the wiki helper, which needs the `requests` package.
 | File | What it does |
 |---|---|
 | `tld_save_reader.py` | Lists every item in a save, as a summary or a CSV |
+| `test_tld_save_reader.py` | Tests for where `tld_save_reader.py` writes its CSV |
 | `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, and where the prefab comes from |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
 | `tld_wiki_updater.py` | Lists items on the game's wiki that the item table does not cover. Needs internet access and the `requests` package |
@@ -27,12 +28,16 @@ path in front of the script name, or Python will not find the script.
 ```powershell
 $save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox1"
 python tld_save_reader.py $save --summary
+python tld_save_reader.py $save --csv
 python tld_save_reader.py $save --out items.csv
 python tld_save_reader.py $save --out items.csv --include-unsearched
 ```
 
-`--csv` without `--out` writes `<save>.csv` next to the save, which is inside the game's
-save folder. Use `--out` to write somewhere else.
+`--csv` writes the item list to `TLD-save-reports` in your home folder, in a file named
+after the save: `C:\Users\you\TLD-save-reports\sandbox1.csv`. The folder is made when it
+is missing, and a new run replaces the earlier report for that save. `--out` writes the
+CSV to the file you name. Nothing is written to the game's save folder unless you point
+`--out` there.
 
 `--include-unsearched` adds the loot waiting in containers you have not opened yet. That
 is a spoiler, so it is off by default.
@@ -323,8 +328,9 @@ python -m unittest -v
 
 With `TLD_SAVE_DIR` set, the edit tests also change one count and one condition in each
 real save. That happens in memory only: no file is written. The apply tests copy each real
-save into a temporary folder and work on the copy. Your save folder is only read. Allow
-about five minutes for the whole run.
+save into a temporary folder and work on the copy. The reader tests write each real save's
+CSV to a temporary folder. Your save folder is only read. Allow about five minutes for the
+whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.

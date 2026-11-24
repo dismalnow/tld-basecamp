@@ -7,6 +7,9 @@ Usage:
     python tld_save_reader.py [save_file] [--csv] [--out FILE] [--scene SCENE_NAME]
                               [--summary] [--include-unsearched]
 
+--csv writes <save name>.csv to the folder TLD-save-reports in your home folder.
+--out FILE writes the CSV to FILE.
+
 Item categories and the source column (base game, DLC, mod) come from
 tld_taxonomy.py, which must sit next to this file.
 The save file is only read, never written.
@@ -645,6 +648,19 @@ def print_table(records: list) -> None:
         print(sep.join(v.ljust(widths[h]) for h, v in zip(HEADERS, row)))
 
 
+DEFAULT_REPORT_FOLDER = "TLD-save-reports"
+
+
+def default_csv_path(save_file: Path) -> Path:
+    """Where --csv writes when --out is not given: TLD-save-reports in the home folder.
+
+    The folder is outside the game's save folder on purpose. Steam Cloud syncs that folder,
+    and a report next to a save is clutter there. The CSV is named after the whole file
+    name, so a save and a backup of it do not share a report.
+    """
+    return Path.home() / DEFAULT_REPORT_FOLDER / f"{save_file.name}.csv"
+
+
 def write_csv(records: list, path: Path) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -769,12 +785,15 @@ Examples:
   python tld_save_reader.py sandbox1 --out items.csv
   python tld_save_reader.py sandbox1 --scene CampOffice
   python tld_save_reader.py sandbox1 --scene LakeRegion --csv
+
+The CSV goes to TLD-save-reports in your home folder, named after the save
+(sandbox1.csv), unless --out names another file.
         """,
     )
     parser.add_argument("save_file", type=Path, nargs="?")
     parser.add_argument("--csv", action="store_true", help="Write full item list to CSV")
     parser.add_argument("--out", type=Path,
-                        help="CSV file to write (default: next to the save file, with a .csv suffix)")
+                        help="CSV file to write (default: see the note below)")
     parser.add_argument("--scene", help="Filter to scenes containing this string")
     parser.add_argument("--summary", action="store_true", help="Print summary stats only")
     parser.add_argument("--include-unsearched", action="store_true",
@@ -804,8 +823,19 @@ Examples:
         print(f"Filtered to '{args.scene}': {len(records)} records.", file=sys.stderr)
 
     if args.csv or args.out:
-        out_path = args.out or args.save_file.with_suffix(".csv")
-        write_csv(records, out_path)
+        if args.out:
+            out_path = args.out
+        else:
+            try:
+                out_path = default_csv_path(args.save_file)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+            except (OSError, RuntimeError) as error:
+                sys.exit(f"Could not use the default CSV folder: {error}. "
+                         f"Use --out FILE to choose a place.")
+        try:
+            write_csv(records, out_path)
+        except OSError as error:
+            sys.exit(f"Could not write {out_path}: {error}")
     else:
         print_summary(records)
         if not args.summary:
