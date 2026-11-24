@@ -10,9 +10,9 @@ Usage:
 --csv writes <save name>.csv to the folder TLD-save-reports in your home folder.
 --out FILE writes the CSV to FILE.
 
-Item categories and the source column (base game, DLC, mod) come from
-tld_taxonomy.py. Decompression comes from tld_save_codec.py. Both must sit next
-to this file.
+Item categories, display names and the source column (base game, DLC, mod) come
+from tld_taxonomy.py. Decompression comes from tld_save_codec.py. Both must sit
+next to this file.
 The save file is only read, never written.
 """
 
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from tld_save_codec import lzf_decompress
-from tld_taxonomy import TAXONOMY_LOOKUP, normalize_prefab, prefab_source
+from tld_taxonomy import TAXONOMY_LOOKUP, display_name, normalize_prefab, prefab_source
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +524,7 @@ def _make_record(scene: str, region: str, location: str, location_type: str,
         container_prefab=container_prefab,
         category=category,
         subcategory=subcategory,
-        item=_pretty_name(prefab),
+        item=display_name(prefab) or _pretty_name(prefab),
         prefab=prefab,
         source=prefab_source(prefab),
         count=_count(gear),

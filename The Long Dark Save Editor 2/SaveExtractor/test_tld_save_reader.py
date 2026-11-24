@@ -1,5 +1,5 @@
 r"""Tests for tld_save_reader.py: where it writes its CSV, its region labels, how it decompresses,
-and the weight, liters and calories it reads.
+the weight, liters and calories it reads, and the item names it shows.
 
 Run from this folder:
     python -m unittest -v
@@ -447,6 +447,42 @@ class StoredAmountTests(ReaderCase):
         self.assertEqual(reader.HEADERS[:14], [
             "region", "location", "location_type", "container", "category", "subcategory", "item",
             "count", "condition_pct", "x", "y", "z", "prefab", "source"])
+
+
+class ItemNameTests(ReaderCase):
+    """The item column: the game's name where the item table has one, a name from the prefab otherwise."""
+
+    def names_for(self, *prefabs: str) -> List[Tuple[str, str]]:
+        gear: Dict[str, JsonValue] = {"m_NormalizedCondition": Number("1.0")}
+        carried: List[JsonValue] = [
+            {"m_PrefabName": prefab, "m_SerializedGear": NestedJson(gear)} for prefab in prefabs]
+        slot = codec.decode_save(small_save()).slot
+        entries = slot["m_Dict"]
+        assert isinstance(entries, dict)
+        entries["global"] = {"m_Inventory_Serialized": NestedJson({"m_SerializedItems": carried})}
+        self.save.write_bytes(codec.encode_save(DecodedSave(slot)))
+        return [(record.prefab, record.item) for record in reader.read_save(self.save).records]
+
+    def test_an_item_the_table_names_shows_the_games_name(self) -> None:
+        self.assertEqual(self.names_for("GEAR_BasicBoots", "GEAR_KeroseneLampB", "GEAR_AuroraEnergyDrink"), [
+            ("GEAR_BasicBoots", "Trail Boots"), ("GEAR_KeroseneLampB", "Storm Lantern"),
+            ("GEAR_AuroraEnergyDrink", "Aurora Energy Drink")])
+
+    def test_an_item_without_a_known_name_gets_one_from_its_prefab(self) -> None:
+        self.assertEqual(self.names_for("GEAR_KeroseneLamp_Spelunkers", "GEAR_NotInAnyTable"), [
+            ("GEAR_KeroseneLamp_Spelunkers", "Kerosene Lamp Spelunkers"),
+            ("GEAR_NotInAnyTable", "Not In Any Table")])
+
+    def test_a_hand_placed_copy_shows_the_same_name(self) -> None:
+        self.assertEqual(self.names_for("GEAR_Stick (4)"), [("GEAR_Stick", "Stick")])
+
+    def test_the_csv_carries_the_name(self) -> None:
+        self.names_for("GEAR_BasicBoots")
+        code, _, _ = self.run_reader(str(self.save), "--csv")
+        self.assertEqual(code, 0)
+        rows = rows_of(self.reports / "sandbox15.csv")
+        item, prefab = reader.HEADERS.index("item"), reader.HEADERS.index("prefab")
+        self.assertEqual((rows[1][item], rows[1][prefab]), ("Trail Boots", "GEAR_BasicBoots"))
 
 
 def real_saves() -> Sequence[Path]:

@@ -9,7 +9,8 @@ except the wiki helper, which needs the `requests` package.
 |---|---|
 | `tld_save_reader.py` | Lists every item in a save, as a summary or a CSV |
 | `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, how it decompresses, and the weight, liters and calories it reads |
-| `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, and where the prefab comes from |
+| `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, where the prefab comes from, and the game's display name where a source states it |
+| `test_tld_taxonomy.py` | Tests for the display names in `tld_taxonomy.py` |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
 | `tld_wiki_updater.py` | Lists items on the game's wiki that the item table does not cover. Needs internet access and the `requests` package |
 | `test_tld_wiki_updater.py` | Tests for `tld_wiki_updater.py`. They need the `requests` package and never reach the wiki |
@@ -51,7 +52,8 @@ is a spoiler, so it is off by default.
 | `location_type` | `player_inventory`, `floor`, `scripted` (placed by the game, not interactive yet), `container`, `container_unsearched` |
 | `container` | Container name, for items in containers |
 | `category`, `subcategory` | From `tld_taxonomy.py`. `Unknown` means the prefab is not in the table |
-| `item`, `prefab` | Readable name and the `GEAR_` prefab name |
+| `item` | The name the game shows for the item, where the item table has it. Otherwise a name made from the prefab name: `Kerosene Lamp Spelunkers` for `GEAR_KeroseneLamp_Spelunkers` |
+| `prefab` | The `GEAR_` prefab name, exactly as the save stores it. Two prefabs can share one display name, so this is the column that tells items apart |
 | `count`, `condition_pct` | Stack size and condition. Both are unknown for unsearched loot |
 | `x`, `y`, `z` | Position in the scene |
 | `source` | `base`, `DLC01` (Tales from the Far Territory), `DLC02` (Iron Road), `mod:<pack>`, or `legacy` |
@@ -361,6 +363,9 @@ skipped there.
   stored weight of each item (`unit_weight_kg`), which leaves out liquid, the part of a food
   item already eaten, and wet clothing.
 - Powders (flour, salt, oats, gunpowder) store their amount as a weight. It is not read.
+- The game's display name is known for 617 of the 1,040 prefabs: the items the C# editor
+  names (game v2.27 and older), the mod items, and eleven items by way of the wiki. The
+  other 423, most of them from the two DLCs, show a name made from the prefab name.
 - Saves from before 2018 use a different format and are not supported.
 - No save checked so far contains text outside plain ASCII. If the game writes such text
   in a form `tld_save_codec.py` does not reproduce, `verify` reports `FAILED` for that save.
