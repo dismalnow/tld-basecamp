@@ -2200,10 +2200,101 @@ class SetPlayerTests(unittest.TestCase):
         self.assertIn("rest is already 100.0% of the bar",
                       self.refusal({"rest": 100}, player_save({"rest": "0"})))
 
-    def test_a_number_the_game_left_out_is_not_put_back(self) -> None:
-        message = self.refusal({"warmth": 50})
-        self.assertIn("this save holds no number for warmth. The game leaves m_CurrentFreezingProxy out when "
-                      "it is 0, and setting it would add a field to the save", message)
+    def test_a_number_the_game_left_out_is_put_in_front_of_its_record(self) -> None:
+        original = player_save()
+        result = edit.set_player_values(original, {"warmth": 50})
+        self.assertEqual(result.changes, (("warmth", None, "50.0"),))
+        # Built independently: the builder writes the number first in its record, as the game does.
+        self.assertEqual(result.data, player_save({"warmth": "50.0"}))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [("m_Dict > global > m_Freezing_Serialized",
+                                  "fields m_NumSecondsSinceLastVoiceOver",
+                                  "fields m_CurrentFreezingProxy, m_NumSecondsSinceLastVoiceOver")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_every_value_but_the_condition_can_be_put_in(self) -> None:
+        nothing = player_save(dict.fromkeys(PLAYER_FIELDS))
+        result = edit.set_player_values(nothing, {"warmth": 25, "rest": 50, "hydration": 75, "calories": 1000})
+        self.assertEqual(result.changes, (("calories", None, "1000.0"), ("hydration", None, "25.0"),
+                                          ("rest", None, "50.0"), ("warmth", None, "75.0")))
+        self.assertEqual(result.data, player_save({"condition": None, "calories": "1000.0", "hydration": "25.0",
+                                                   "rest": "50.0", "warmth": "75.0"}))
+
+    def test_numbers_held_and_numbers_left_out_change_in_one_edit(self) -> None:
+        original = player_save()
+        result = edit.set_player_values(original, {"warmth": 25, "condition": 100, "rest": 100})
+        self.assertEqual(result.changes, (("condition", "76.66127", "100.0"), ("rest", "9.5124445", "0.0"),
+                                          ("warmth", None, "75.0")))
+        self.assertEqual(result.data, player_save({"condition": "100.0", "rest": "0.0", "warmth": "75.0"}))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual([path for path, _, _ in found], [player_path("condition"), player_path("rest"),
+                                                          "m_Dict > global > m_Freezing_Serialized"])
+
+    def test_a_number_left_out_that_would_stay_zero_is_refused(self) -> None:
+        self.assertIn("warmth is already 100.0% of the bar: the game leaves m_CurrentFreezingProxy out of the "
+                      "save when it is 0. Nothing to change", self.refusal({"warmth": 100}))
+        self.assertIn("calories is already 0.0: the game leaves m_CurrentReserveCaloriesProxy out of the save "
+                      "when it is 0", self.refusal({"calories": 0}, player_save({"calories": None})))
+
+    def test_a_missing_condition_is_not_put_in(self) -> None:
+        dead = player_save({"condition": None})
+        self.assertIn("this save holds no condition, which means 0: the character is dead. This tool does not "
+                      "bring it back", self.refusal({"condition": 50}, dead))
+        # The other values of that save can still be changed.
+        self.assertEqual(edit.set_player_values(dead, {"rest": 100}).data,
+                         player_save({"condition": None, "rest": "0.0"}))
+
+    def put_in_wrongly(self, cold: Dict[str, JsonValue]) -> str:
+        """What the tool says when the encoder writes this record of the cold where warmth 50 was asked for."""
+        wrong = player_save(records={"m_Freezing_Serialized": NestedJson(cold)})
+        with encoding_as(player_save({"warmth": "50.0"}), wrong):
+            with self.assertRaises(EditError) as refused:
+                edit.set_player_values(player_save(), {"warmth": 50})
+        return str(refused.exception)
+
+    def test_a_number_put_in_with_another_value_is_caught(self) -> None:
+        message = self.put_in_wrongly({"m_CurrentFreezingProxy": Number("75.0"),
+                                       "m_NumSecondsSinceLastVoiceOver": Number("Infinity")})
+        self.assertIn("m_Freezing_Serialized in the edited save is not the original one with "
+                      "m_CurrentFreezingProxy 50.0 put in front: m_CurrentFreezingProxy is 75.0", message)
+
+    def test_a_number_put_in_next_to_another_change_in_its_record_is_caught(self) -> None:
+        # The comparison of the two saves stops at a record whose fields changed, so this takes its own check.
+        message = self.put_in_wrongly({"m_CurrentFreezingProxy": Number("50.0"),
+                                       "m_NumSecondsSinceLastVoiceOver": Number("5.0")})
+        self.assertIn("put in front: m_NumSecondsSinceLastVoiceOver changed as well", message)
+
+    def test_a_number_put_in_at_the_end_of_its_record_is_caught(self) -> None:
+        message = self.put_in_wrongly({"m_NumSecondsSinceLastVoiceOver": Number("Infinity"),
+                                       "m_CurrentFreezingProxy": Number("50.0")})
+        self.assertIn("fields m_NumSecondsSinceLastVoiceOver, m_CurrentFreezingProxy", message)
+
+    def test_the_check_of_a_number_put_in(self) -> None:
+        original, good = player_save(), player_save({"warmth": "50.0"})
+        edit._prove_number_put_in(original, good, "warmth", "50.0")
+        cases = {
+            "nothing put in": (original, "its fields are m_NumSecondsSinceLastVoiceOver"),
+            "put in at the end": (player_save(records={"m_Freezing_Serialized": NestedJson(
+                {"m_NumSecondsSinceLastVoiceOver": Number("Infinity"),
+                 "m_CurrentFreezingProxy": Number("50.0")})}),
+                "its fields are m_NumSecondsSinceLastVoiceOver, m_CurrentFreezingProxy"),
+            "text put in": (player_save(records={"m_Freezing_Serialized": NestedJson(
+                {"m_CurrentFreezingProxy": "50.0", "m_NumSecondsSinceLastVoiceOver": Number("Infinity")})}),
+                'm_CurrentFreezingProxy is "50.0"'),
+            "the record is gone": (player_save(records={"m_Freezing_Serialized": None}),
+                                   "the record cannot be read"),
+        }
+        for name, (edited, problem) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(EditError) as caught:
+                    edit._prove_number_put_in(original, edited, "warmth", "50.0")
+                self.assertIn("safety check failed: m_Freezing_Serialized in the edited save is not the "
+                              f"original one with m_CurrentFreezingProxy 50.0 put in front: {problem}",
+                              str(caught.exception))
+        with self.assertRaises(EditError):
+            edit._prove_number_put_in(player_save(records={"m_Freezing_Serialized": None}), good, "warmth",
+                                      "50.0")
 
     def test_values_that_cannot_be_read_are_refused(self) -> None:
         thirst = "m_Thirst_Serialized"
@@ -2229,7 +2320,7 @@ class SetPlayerTests(unittest.TestCase):
         original = player_save()
         kept = bytes(original)
         # The first value could be changed. The second one cannot, and no save comes back.
-        for values in ({"condition": 100, "warmth": 50}, {"condition": 100, "rest": 100.5},
+        for values in ({"condition": 100, "warmth": 100}, {"condition": 100, "rest": 100.5},
                        {"condition": 100, "rest": 90.4875555}):
             with self.subTest(values=values):
                 with self.assertRaises(EditError):
@@ -3097,6 +3188,31 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(after[:2], before[:2], "the original save changed")
         self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
 
+    def test_set_player_says_when_it_puts_a_number_in(self) -> None:
+        self.save.write_bytes(player_save())
+        code, out, err = self.run_command("set-player", str(self.save), "--warmth", "60", "--rest", "100",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), player_save({"rest": "0.0", "warmth": "40.0"}))
+        self.assertEqual(out.splitlines()[1:6], [
+            "Change:   rest 90.5% of the bar -> 100.0% of the bar (stored as m_CurrentFatigueProxy 9.5124445 "
+            "-> 0.0)",
+            "Change:   warmth 100.0% of the bar -> 60.0% of the bar (the game had left m_CurrentFreezingProxy "
+            "out of the save, which means 0. It is put in as 40.0)",
+            "Checked:  the edited save differs from the original in exactly these 2 values",
+            "Checked:  the number that was put in is the first in its record, where the game writes it, and "
+            "nothing else in that record differs",
+            "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
+        ])
+
+    def test_set_player_counts_the_numbers_it_puts_in(self) -> None:
+        self.save.write_bytes(player_save({"rest": None}))
+        code, out, err = self.run_command("set-player", str(self.save), "--warmth", "60", "--rest", "50",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertIn("Checked:  the 2 numbers that were put in are the first in its record, where the game "
+                      "writes it, and nothing else in that record differs\n", out)
+
     def test_set_player_takes_each_value_by_its_own_option(self) -> None:
         held = player_save({"warmth": "82.56313"})
         for option, given, name, stored in (("--condition", "55.5", "condition", "55.5"),
@@ -3124,11 +3240,11 @@ class CommandTests(unittest.TestCase):
         cases = {
             "too high": (["--hydration", "101", "--out", str(self.out)],
                          "hydration must be a number from 0 to 100"),
-            "left out of the save": (["--warmth", "50", "--out", str(self.out)],
-                                     "this save holds no number for"),
+            "left out and still 0": (["--warmth", "100", "--out", str(self.out)],
+                                     "warmth is already 100.0% of the bar: the game leaves"),
             "no change": (["--condition", "76.66127", "--out", str(self.out)], "condition is already 76.7%"),
-            "one of two is refused": (["--condition", "100", "--warmth", "50", "--out", str(self.out)],
-                                      "this save holds no number for warmth"),
+            "one of two is refused": (["--condition", "100", "--warmth", "100", "--out", str(self.out)],
+                                      "warmth is already 100.0% of the bar"),
             "output exists": (["--condition", "100", "--out", str(existing)], "already exists"),
         }
         before = self.snapshot()
@@ -3501,8 +3617,23 @@ class RealSaveTests(unittest.TestCase):
                         held += 1
         self.assertGreaterEqual(held, 3 * len(saves))
 
+    def test_a_value_a_real_save_holds_is_the_first_field_of_its_record(self) -> None:
+        # That is where this tool puts a number the game left out.
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        held = 0
+        for path in codec.find_saves(folder):
+            save = codec.decode_save(path.read_bytes())
+            for name, where in edit.PLAYER_VALUES.items():
+                record = edit._player_record(save, name)
+                self.assertIsNotNone(record)
+                if where.field in record:
+                    with self.subTest(save=path.name, value=name):
+                        self.assertEqual(list(record)[0], where.field)
+                    held += 1
+        self.assertTrue(held, "no real save holds one of the player's values")
+
     def test_the_players_values_can_be_changed_in_every_real_save(self) -> None:
-        """In memory only. No file is written. Every value a save holds is changed in one edit."""
+        """In memory only. No file is written. All five values of a save are changed in one edit."""
         folder = Path(os.environ["TLD_SAVE_DIR"])
         saves = codec.find_saves(folder)
         self.assertTrue(saves, f"no save files found in {folder}")
@@ -3512,9 +3643,10 @@ class RealSaveTests(unittest.TestCase):
             with self.subTest(save=path.name):
                 original = path.read_bytes()
                 before = edit.read_player(codec.decode_save(original))
+                # A number the game left out is 0, which is the best value of a bar. It gets the other one.
                 wanted = {value.name: best[value.name][value.shown == Decimal(repr(best[value.name][0]))]
-                          for value in before if value.stored is not None}
-                self.assertGreaterEqual(len(wanted), 3)
+                          for value in before}
+                self.assertEqual(len(wanted), 5)
                 result = edit.set_player_values(original, wanted)
                 self.assertEqual({name for name, _, _ in result.changes}, set(wanted))
                 self.assertEqual(result.unchanged_entries, result.entries - 1)

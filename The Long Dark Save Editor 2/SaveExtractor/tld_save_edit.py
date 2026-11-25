@@ -36,7 +36,8 @@ inventory. copy-item adds another one of an item the inventory holds.
 player lists the player's own values: condition, calories, and the three bars for thirst,
 fatigue and cold. set-player changes one or more of them. It takes every number the way
 the game shows it, so 100 is a full bar: --hydration 100 is not thirsty at all, --rest 100
-is fully rested, and --warmth 100 is warm.
+is fully rested, and --warmth 100 is warm. The game leaves a number out of the save when it
+is 0, and set-player puts such a number in where the game writes it.
 
 set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item and set-player have
 not been tested in the game yet. Their own output says so.
@@ -1480,15 +1481,45 @@ def read_player(save: DecodedSave) -> List[PlayerValue]:
 
 @dataclass(frozen=True)
 class PlayerEdit:
-    data: bytes                                  # the edited save
-    changes: Tuple[Tuple[str, str, str], ...]    # (name, the number stored before, the number stored now)
-    entries: int                                 # entries in the save
-    unchanged_entries: int                       # entries that are byte for byte the original
+    data: bytes               # the edited save
+    # (name, the number stored before, the number stored now). The number before is None for
+    # a number the game had left out of the save, which the edit put in.
+    changes: Tuple[Tuple[str, Optional[str], str], ...]
+    entries: int              # entries in the save
+    unchanged_entries: int    # entries that are byte for byte the original
+
+
+def _player_record_path(name: str) -> str:
+    return f"{codec.ENTRY_TABLE} > global > {PLAYER_VALUES[name].record}"
 
 
 def _player_path(name: str) -> str:
-    where = PLAYER_VALUES[name]
-    return f"{codec.ENTRY_TABLE} > global > {where.record} > {where.field}"
+    return f"{_player_record_path(name)} > {PLAYER_VALUES[name].field}"
+
+
+def _prove_number_put_in(original: bytes, edited: bytes, name: str, new: str) -> None:
+    """Decode both saves afresh and confirm that one record got one number more, in front, and no other change.
+
+    The comparison of two saves reports a record with another set of fields as one difference
+    and does not look inside it. So every field the record had is compared here.
+    """
+    field = PLAYER_VALUES[name].field
+    before = _player_record(codec.decode_save(original), name)
+    after = _player_record(codec.decode_save(edited), name)
+    problem = None
+    if before is None or after is None:
+        problem = "the record cannot be read"
+    elif list(after) != [field] + list(before):
+        problem = f"its fields are {', '.join(after)}"
+    elif not isinstance(after[field], Number) or after[field].literal != new:
+        problem = f"{field} is {_show(after[field])}"
+    else:
+        changed = [key for key in before if next(differences(before[key], after[key]), None) is not None]
+        if changed:
+            problem = f"{changed[0]} changed as well"
+    if problem is not None:
+        raise EditError(f"safety check failed: {PLAYER_VALUES[name].record} in the edited save is not the "
+                        f"original one with {field} {new} put in front: {problem}")
 
 
 def stored_player_value(name: str, value: float) -> str:
@@ -1511,6 +1542,10 @@ def set_player_values(original: bytes, values: Dict[str, float]) -> PlayerEdit:
     game shows it: percent, or calories. Raises EditError for a name or a number outside of
     that, for a value the save does not hold as a plain number, and for a value that is what
     the save holds already.
+
+    The game leaves a number out of the save when it is 0. Such a number is put in as the first
+    field of its record, which is where the game writes it. The condition is the exception: a
+    save without one is that of a dead character, and this tool does not bring it back.
     """
     unknown = [name for name in values if name not in PLAYER_VALUES]
     if unknown or not values:
@@ -1529,29 +1564,44 @@ def set_player_values(original: bytes, values: Dict[str, float]) -> PlayerEdit:
         record = PLAYER_VALUES[name].record
         return order.index(record) if record in order else len(order)
 
-    changes: List[Tuple[str, str, str]] = []
+    changes: List[Tuple[str, Optional[str], str]] = []
+    expected: List[Difference] = []
     for name in sorted(wanted, key=place):
         where = PLAYER_VALUES[name]
         record = _player_record(save, name)
         if record is None:
             raise EditError(f"{name} is not stored the way this tool expects ({where.record}), so it is not "
                             "changed")
+        new = wanted[name]
         if where.field not in record:
-            raise EditError(f"this save holds no number for {name}. The game leaves {where.field} out when it "
-                            "is 0, and setting it would add a field to the save. This tool does not do that "
-                            "yet")
+            if name == "condition":
+                raise EditError("this save holds no condition, which means 0: the character is dead. This "
+                                "tool does not bring it back")
+            if Decimal(new) == 0:
+                raise EditError(f"{name} is already {_player_text(name, _shown(name, Decimal(0)))}: the game "
+                                f"leaves {where.field} out of the save when it is 0. Nothing to change")
+            fields = list(record.items())
+            record.clear()
+            record[where.field] = Number(new)
+            record.update(fields)
+            changes.append((name, None, new))
+            expected.append((_player_record_path(name), "fields " + ", ".join(key for key, _ in fields),
+                             "fields " + ", ".join(record)))
+            continue
         old = record[where.field]
         number = _finite(old)
         if number is None or not isinstance(old, Number):
             raise EditError(f"{name} is not stored as a number ({where.field}), so it is not changed")
-        new = wanted[name]
         if number == Decimal(new):
             raise EditError(f"{name} is already {_player_text(name, _shown(name, number))}. Nothing to change")
         record[where.field] = Number(new)
         changes.append((name, old.literal, new))
+        expected.append((_player_path(name), old.literal, new))
     edited = codec.encode_save(save)
-    entries, unchanged = _prove_changes(original, edited,
-                                        [(_player_path(name), old, new) for name, old, new in changes])
+    entries, unchanged = _prove_changes(original, edited, expected)
+    for name, old, new in changes:
+        if old is None:
+            _prove_number_put_in(original, edited, name, new)
     return PlayerEdit(edited, tuple(changes), entries, unchanged)
 
 
@@ -1748,11 +1798,19 @@ def _run_player_edit(path: Path, out: Path, values: Dict[str, float]) -> int:
     count = len(edit.changes)
     print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
     for name, old, new in edit.changes:
-        before, after = (_player_text(name, _shown(name, Decimal(stored))) for stored in (old, new))
-        print(f"Change:   {name} {before} -> {after} "
-              f"(stored as {PLAYER_VALUES[name].field} {old} -> {new})")
+        before, after = (_player_text(name, _shown(name, Decimal(stored))) for stored in (old or "0", new))
+        field = PLAYER_VALUES[name].field
+        stored = f"stored as {field} {old} -> {new}" if old is not None \
+            else f"the game had left {field} out of the save, which means 0. It is put in as {new}"
+        print(f"Change:   {name} {before} -> {after} ({stored})")
     print("Checked:  the edited save differs from the original in exactly "
           + ("this one value" if count == 1 else f"these {count} values"))
+    put_in = sum(old is None for _, old, _ in edit.changes)
+    if put_in:
+        print("Checked:  " + ("the number that was put in is" if put_in == 1 else
+                              f"the {put_in} numbers that were put in are")
+              + " the first in its record, where the game writes it, and nothing else in that record "
+                "differs")
     print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
           "(all except global)")
     if "set-player" in NOT_TESTED_IN_GAME:

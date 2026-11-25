@@ -559,8 +559,18 @@ Things to know about the player's values:
   dehydrated, exhausted and freezing.
 - The game leaves a number out of a save when it is 0, and `player` then says `is left out,
   which means 0`. In the 14 real saves that is so for the cold in seven, and for the fatigue
-  in one. `set-player` refuses such a value for now, because setting it would add a field to
-  the save and not change a value. That step is next: see `ROADMAP.md`.
+  in one. `set-player` puts such a number in as the first field of its record. That is where
+  the game writes it in every real save that holds one (62 of 62). The `Change` line says so,
+  and one more check runs: the record must be the original one with that number in front, and
+  nothing else in it may differ.
+
+  ```text
+  Change:   warmth 100.0% of the bar -> 60.0% of the bar (the game had left m_CurrentFreezingProxy out of the save, which means 0. It is put in as 40.0)
+  Checked:  the number that was put in is the first in its record, where the game writes it, and nothing else in that record differs
+  ```
+
+  A save that holds no condition is the exception. That is the save of a dead character, and
+  the tool does not bring it back.
 - The numbers are written as 32-bit floats, the way the game writes them (checked against
   all 62 numbers that the 14 real saves hold for these five values).
 - Only the numbers change. Next to each one the save keeps what the character last said

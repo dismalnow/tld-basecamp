@@ -43,8 +43,8 @@ change finishes or advances an item, update this file in the same pull request.
 
 | Item | State |
 |---|---|
-| Condition, calories, and the bars for thirst, fatigue and cold | Built (pull request 16) for a value the save holds: `player` lists the five, `set-player` changes them. Not tested in game |
-| A value the game left out of the save | Not started. The game leaves a number out when it is 0, and `set-player` refuses it for now. Setting it adds a field, which needs a check of its own |
+| Condition, calories, and the bars for thirst, fatigue and cold | Built (pull request 16): `player` lists the five, `set-player` changes them. Not tested in game |
+| A value the game left out of the save | Built (pull request 17). Not tested in game. The game leaves a number out when it is 0. `set-player` puts it in as the first field of its record, where the game writes it, and checks that record on its own. A missing condition is left alone |
 | Skills | Not started. The save holds points for nine skills, and no level |
 | Cure afflictions | Not started. Active in the 14 saves at hand: hypothermia, a burn, sprained wrists and sprain pain |
 | Position | Not started. Inside the current scene only |
