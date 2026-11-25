@@ -10,6 +10,7 @@ Usage:
     python tld_save_edit.py weapons SAVE
     python tld_save_edit.py player SAVE
     python tld_save_edit.py skills SAVE
+    python tld_save_edit.py afflictions SAVE
     python tld_save_edit.py set-count SAVE --item GEAR_NAME --count N --out NEW_FILE [--entry N]
     python tld_save_edit.py set-condition SAVE --item GEAR_NAME --condition PERCENT --out NEW_FILE [--entry N]
     python tld_save_edit.py set-liters SAVE --item GEAR_NAME --liters LITERS --out NEW_FILE [--entry N]
@@ -22,6 +23,7 @@ Usage:
                                             [--hydration PERCENT] [--rest PERCENT] [--warmth PERCENT]
                                             --out NEW_FILE
     python tld_save_edit.py set-skill SAVE --skill NAME --points N --out NEW_FILE
+    python tld_save_edit.py cure SAVE --out NEW_FILE
 
 items lists everything in the player's inventory: entry number, item, count, condition.
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
@@ -44,8 +46,12 @@ is 0, and set-player puts such a number in where the game writes it.
 skills lists the points of the nine skills, and set-skill changes the points of one. The
 save holds points and no level.
 
-set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item, set-player and
-set-skill have not been tested in the game yet. Their own output says so.
+afflictions lists five kinds of affliction: hypothermia, sprain pain, sprained ankles,
+sprained wrists and burns. cure ends every case of those five that the save holds. A save
+can hold other afflictions. This tool does not read them and leaves them as they are.
+
+set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item, set-player,
+set-skill and cure have not been tested in the game yet. Their own output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -55,8 +61,9 @@ Three checks stand between an edit and a written file:
     1. The original must pass the exact rebuild check (tld_save_codec.py verify).
     2. The edited save, decoded again, must differ from the original in exactly what was
        asked for: one value, for repair-all one condition for each repaired item, for
-       remove-item one inventory entry less, for copy-item one more, and for set-player
-       one value for each option. Every other entry must be byte for byte unchanged.
+       remove-item one inventory entry less, for copy-item one more, for set-player one
+       value for each option, and for cure the values that end each case. Every other
+       entry must be byte for byte unchanged.
        When an edit puts in a number the game had left out, the record that got it is
        checked field by field as well.
     3. The file on disk is read back and compared with what was meant to be written.
@@ -106,7 +113,7 @@ ROUNDS_HELD: Dict[str, int] = {
 
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
 NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item",
-                                "copy-item", "set-player", "set-skill"})
+                                "copy-item", "set-player", "set-skill", "cure"})
 
 Difference = Tuple[str, str, str]
 
@@ -1746,6 +1753,128 @@ def set_skill_points(original: bytes, skill: str, points: int) -> SkillEdit:
 
 
 # ---------------------------------------------------------------------------
+# Afflictions
+# ---------------------------------------------------------------------------
+
+_ACTIVE = "m_Active"
+_SPRAIN_LISTS = ("m_CausesLocIDs", "m_Locations", "m_ElapsedHoursList", "m_DurationHoursList",
+                 "m_ElapsedRestList")
+
+
+@dataclass(frozen=True)
+class _AfflictionKind:
+    record: str                # the record of the affliction in the global entry
+    lists: Tuple[str, ...]     # the lists that hold one item for each case. Empty for a kind with a switch
+
+
+# The kinds of affliction this tool reads and cures, by the names it prints. The save holds a
+# kind in one of two ways. Hypothermia and burns are there or not, and m_Active says which.
+# The others can be there several times, with one item for each case in every list of the record.
+AFFLICTIONS: Dict[str, _AfflictionKind] = {
+    "hypothermia": _AfflictionKind("m_HypothermiaSerialized", ()),
+    "sprain-pain": _AfflictionKind("m_SprainPainSerialized", ("m_Locations", "m_Causes", "m_EndTimes")),
+    "sprained-ankle": _AfflictionKind("m_SprainedAnkleSerialized", _SPRAIN_LISTS),
+    "sprained-wrist": _AfflictionKind("m_SprainedWristSerialized", _SPRAIN_LISTS),
+    "burns": _AfflictionKind("m_BurnsSerialized", ()),
+}
+
+
+@dataclass(frozen=True)
+class Affliction:
+    name: str                # the name this tool prints, for example sprained-wrist
+    record: str              # the record of the affliction in the save
+    cases: Optional[int]     # how many the save holds: 0 or 1 for a kind with a switch. None: it cannot be read
+
+
+def _affliction(save: DecodedSave, name: str) -> Optional[Tuple[Dict[str, JsonValue], int]]:
+    """The record of one kind of affliction and the cases it holds. None when it is not stored as expected."""
+    document = save.entries.get("global")
+    record = document.get(AFFLICTIONS[name].record) if isinstance(document, dict) else None
+    content = record.value if isinstance(record, NestedJson) else None
+    if not isinstance(content, dict):
+        return None
+    lists = AFFLICTIONS[name].lists
+    if not lists:
+        # The game leaves the switch out of the save while it is off.
+        active = content.get(_ACTIVE, False)
+        return (content, int(active)) if isinstance(active, bool) else None
+    lengths: Set[int] = set()
+    for field in lists:
+        held = content.get(field)
+        if not isinstance(held, list):
+            return None
+        lengths.add(len(held))
+    return (content, lengths.pop()) if len(lengths) == 1 else None
+
+
+def list_afflictions(save: DecodedSave) -> List[Affliction]:
+    """What the save holds of the kinds of affliction this tool reads."""
+    listed: List[Affliction] = []
+    for name, kind in AFFLICTIONS.items():
+        read = _affliction(save, name)
+        listed.append(Affliction(name, kind.record, None if read is None else read[1]))
+    return listed
+
+
+@dataclass(frozen=True)
+class CureEdit:
+    data: bytes                            # the edited save
+    cured: Tuple[Tuple[str, int], ...]     # (affliction, cases it had), in the order of the save
+    changes: int                           # values that differ from the original
+    entries: int                           # entries in the save
+    unchanged_entries: int                 # entries that are byte for byte the original
+
+
+def cure_afflictions(original: bytes) -> CureEdit:
+    """Return the save with every case of the afflictions this tool reads ended. Reads and writes no file.
+
+    Hypothermia and burns are switched off. For the other kinds every list that holds one item
+    for each case is emptied. Everything else in those records stays, as it does when the game
+    ends an affliction itself. Raises EditError when the save fails the exact rebuild check,
+    when one of the kinds is not stored the way this tool expects, when there is nothing to
+    cure, and when the result differs from the original in anything but those values.
+    """
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    found: Dict[str, Tuple[Dict[str, JsonValue], int]] = {}
+    unreadable: List[str] = []
+    for name in AFFLICTIONS:
+        read = _affliction(save, name)
+        if read is None:
+            unreadable.append(name)
+        else:
+            found[name] = read
+    if unreadable:
+        raise EditError(", ".join(f"{name} ({AFFLICTIONS[name].record})" for name in unreadable)
+                        + (" is" if len(unreadable) == 1 else " are")
+                        + " not stored the way this tool expects, so nothing is cured")
+    order = list(save.entries["global"])
+    cured: List[Tuple[str, int]] = []
+    expected: List[Difference] = []
+    for name in sorted(found, key=lambda kind: order.index(AFFLICTIONS[kind].record)):
+        (record, cases), kind = found[name], AFFLICTIONS[name]
+        if not cases:
+            continue
+        where = f"{codec.ENTRY_TABLE} > global > {kind.record}"
+        if not kind.lists:
+            record[_ACTIVE] = False
+            expected.append((f"{where} > {_ACTIVE}", "true", "false"))
+        for field in [held for held in record if held in kind.lists]:
+            record[field] = []
+            expected.append((f"{where} > {field}", f"{cases} items", "0 items"))
+        cured.append((name, cases))
+    if not cured:
+        names = list(AFFLICTIONS)
+        raise EditError("there is nothing to cure: this save holds no " + ", ".join(names[:-1])
+                        + " or " + names[-1])
+    edited = codec.encode_save(save)
+    entries, unchanged = _prove_changes(original, edited, expected)
+    return CureEdit(edited, tuple(cured), len(expected), entries, unchanged)
+
+
+# ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
 
@@ -2020,6 +2149,60 @@ def _run_skill_edit(path: Path, out: Path, skill: str, points: int) -> int:
     return 0
 
 
+def _run_afflictions(path: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        listed = list_afflictions(codec.decode_save(data))
+    except codec.SaveFormatError as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        return 1
+    width = max(len(name) for name in AFFLICTIONS)
+    print(f"{'affliction':<{width}}  cases  in the save")
+    for kind in listed:
+        if kind.cases is None:
+            print(f"{kind.name:<{width}}         cannot be read: {kind.record} is not stored the way this tool "
+                  "expects")
+        else:
+            print(f"{kind.name:<{width}}  {kind.cases:>5}  {kind.record}")
+    total = sum(kind.cases or 0 for kind in listed)
+    print(f"{_count_text(total, 'case')} of these {len(listed)} kinds of affliction in {path.name}.")
+    print("A save can hold other afflictions, such as frostbite or food poisoning. This tool does not read "
+          "them.")
+    return 0
+
+
+def _run_cure(path: Path, out: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        check_new_file_path(out)
+        edit = cure_afflictions(data)
+        write_new_file(out, edit.data)
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 1
+    values = "this one value" if edit.changes == 1 else f"these {edit.changes} values"
+    print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
+    for name, cases in edit.cured:
+        kind = AFFLICTIONS[name]
+        how = f"{len(kind.lists)} lists emptied" if kind.lists else f"{_ACTIVE} true -> false"
+        print(f"Cured:    {name}, {_count_text(cases, 'case')} ({kind.record}: {how})")
+    print(f"Checked:  the edited save differs from the original in exactly {values}")
+    print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
+          "(all except global)")
+    if "cure" in NOT_TESTED_IN_GAME:
+        print("Untested: no save changed by cure has been loaded in the game yet. Try it on a save you can "
+              "afford to lose")
+    print(f"Written:  {out}, {len(edit.data):,} bytes")
+    print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
+    print(f"{path.name} itself was not changed.")
+    return 0
+
+
 def _percent(stored: str) -> str:
     return f"{float(stored) * 100:.1f}%"
 
@@ -2189,6 +2372,8 @@ Examples:
   python tld_save_edit.py set-player sandbox15 --condition 100 --hydration 100 --out sandbox15.edited
   python tld_save_edit.py skills sandbox15
   python tld_save_edit.py set-skill sandbox15 --skill cooking --points 150 --out sandbox15.edited
+  python tld_save_edit.py afflictions sandbox15
+  python tld_save_edit.py cure sandbox15 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -2201,7 +2386,8 @@ option was wrong.
                        ("foods", "list the inventory items with calories"),
                        ("weapons", "list the inventory items that can hold rounds"),
                        ("player", "list the player's condition, calories, hydration, rest and warmth"),
-                       ("skills", "list the points of the nine skills")):
+                       ("skills", "list the points of the nine skills"),
+                       ("afflictions", "list hypothermia, sprain pain, sprained ankles and wrists, and burns")):
         listing = commands.add_parser(name, help=text)
         listing.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
     set_count = commands.add_parser("set-count", help="change the count of one inventory stack")
@@ -2319,9 +2505,18 @@ option was wrong.
                            help=f"the new points, from 0 to {MAX_SKILL_POINTS}")
     set_skill.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                            help="the file to create. It must not exist yet")
+    cure = commands.add_parser("cure", help="end hypothermia, sprain pain, sprained ankles and wrists, and "
+                                            "burns (not tested in the game yet)")
+    cure.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
+    cure.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                      help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command == "player":
         return _run_player(args.save)
+    if args.command == "afflictions":
+        return _run_afflictions(args.save)
+    if args.command == "cure":
+        return _run_cure(args.save, args.out)
     if args.command == "skills":
         return _run_skills(args.save)
     if args.command == "set-skill":
