@@ -1430,6 +1430,189 @@ class RepairTests(unittest.TestCase):
         self.assertIn("m_UnitsProxy: 2 -> 3", str(caught.exception))
 
 
+def removal_save(without: Optional[int] = None) -> bytes:
+    """A save whose inventory holds items that may go, and items that the tool leaves in place.
+
+    without builds the same save with one inventory entry left out.
+    """
+    made: List[Dict[str, JsonValue]] = [item(*spec) for spec in DEFAULT_ITEMS] + [
+        item("GEAR_Charcoal", None, "1.0"),                # 5: in the player's hands
+        item("GEAR_PackMatches", "13", "0.889"),           # 6: the last item the player held
+        item("GEAR_WoolSocks", None, "0.7"),               # 7: worn
+        item("GEAR_WoolSocks", None, "0.9"),               # 8: not worn
+        item("GEAR_WaterSupplyPotable", None, "1.0"),      # 9 and 10: the water the player carries
+        item("GEAR_WaterSupplyNotPotable", None, "1.0"),
+        item("GEAR_Rope", None, "1.0"),                    # 11: its number is held in a place of unknown use
+        item("GEAR_Knife", None, "1.0"),                   # 12: an instance number that is no whole number
+        item("GEAR_Stone", None, "1.0"),                   # 13: an instance number that is too short
+        item("GEAR_Prybar", None, "1.0"),                  # 14 and 15: two entries with the same number
+        item("GEAR_Hammer", None, "1.0"),
+        item("GEAR_Tinder", None, "1.0"),                  # 16: no gear record
+        item("GEAR_Hook", None, "1.0"),                    # 17: its number is held as text in another place
+        item("GEAR_Scarf", None, "0.5"),                   # 18: clothing with a worn mark that is no yes or no
+    ]
+    numbers = ("-1001000", "-1001001", "-1001002", "1474360", "-1001004", "-347910", "-509100", "-1001007",
+               "-1001008", "-1001009", "-1001010", "-1001011", "12.5", "7", "-1001014", "-1001014", None,
+               "-1001017", "-1001018")
+
+    def gear(entry: int) -> Dict[str, JsonValue]:
+        return made[entry]["m_SerializedGear"].value                           # type: ignore[union-attr]
+
+    for entry, number in enumerate(numbers):
+        if number is not None:
+            gear(entry)["m_InstanceIDProxy"] = Number(number)
+    gear(7)["m_ClothingItemSerialized"] = NestedJson({"m_WearingProxy": True, "m_HasEquippedData": True,
+                                                      "m_EquippedLayerIndex": Number("1")})
+    gear(8)["m_ClothingItemSerialized"] = NestedJson({"m_WearingProxy": False})
+    gear(9)["m_WaterSupplySerialized"] = NestedJson({"m_VolumeProxy": Number("2000000000")})
+    gear(10)["m_WaterSupplySerialized"] = NestedJson({})
+    gear(18)["m_ClothingItemSerialized"] = NestedJson({"m_WearingProxy": "yes"})
+    made[16]["m_SerializedGear"] = None
+    if without is not None:
+        del made[without]
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": list(made),
+                                       "m_QuickSelectInstanceIDs": [Number("0") for _ in range(4)]}
+    return build_save(global_document={
+        "m_Inventory_Serialized": NestedJson(inventory),
+        "m_PlayerManagerSerialized": NestedJson({"m_ItemInHandsInstanceID": Number("-347910"),
+                                                 "m_LastUnequippedItemInstanceID": Number("-509100")}),
+        "m_Unknown": NestedJson({"m_Target": Number("-1001011"), "m_Name": "-1001017",
+                                 "m_OtherSign": Number("1001004")}),
+    })
+
+
+ITEMS_PATH = "m_Dict > global > m_Inventory_Serialized > m_SerializedItems"
+
+
+class RemoveTests(unittest.TestCase):
+    def test_removes_exactly_one_entry(self) -> None:
+        original = removal_save()
+        result = edit.remove_item(original, "GEAR_Hatchet")
+        self.assertEqual((result.prefab, result.entry, result.count, result.condition, result.remaining),
+                         ("GEAR_Hatchet", 1, None, 75.0, 18))
+        # Built independently, without that one entry.
+        self.assertEqual(result.data, removal_save(without=1))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(ITEMS_PATH, "19 items", "18 items")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_a_stack_goes_as_a_whole(self) -> None:
+        result = edit.remove_item(removal_save(), "GEAR_BottleAntibiotics", entry=3)
+        self.assertEqual((result.entry, result.count, result.condition), (3, 12, 25.0))
+        self.assertEqual(result.data, removal_save(without=3))
+
+    def test_the_first_entry_can_go(self) -> None:
+        result = edit.remove_item(removal_save(), "GEAR_WoodMatches")
+        self.assertEqual(result.data, removal_save(without=0))
+
+    def test_the_same_digits_with_the_other_sign_are_another_number(self) -> None:
+        # The stick is number -1001004, and another place in the save holds 1001004.
+        result = edit.remove_item(removal_save(), "GEAR_Stick")
+        self.assertEqual(result.data, removal_save(without=4))
+
+    def test_clothing_that_is_not_worn_can_go(self) -> None:
+        result = edit.remove_item(removal_save(), "GEAR_WoolSocks", entry=8)
+        self.assertEqual(result.data, removal_save(without=8))
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = removal_save()
+        kept = bytes(original)
+        edit.remove_item(original, "GEAR_Hatchet")
+        self.assertEqual(original, kept)
+
+    def test_items_the_tool_leaves_in_place(self) -> None:
+        elsewhere = "the save holds its instance number in another place too: m_Dict > global > "
+        cases = (
+            ("GEAR_Charcoal", None, 5, "it is in your hands in this save. Put it away in the game first"),
+            ("GEAR_PackMatches", None, 6, "it is the last item you held, and the save remembers it by its "
+                                          "number. Hold another item in the game and put that away first"),
+            ("GEAR_WoolSocks", 7, 7, "you are wearing it in this save. Take it off in the game first"),
+            ("GEAR_WaterSupplyPotable", None, 9, "the game keeps the water you carry in this entry. Use "
+                                                 "set-liters to empty it"),
+            ("GEAR_WaterSupplyNotPotable", None, 10, "the game keeps the water you carry in this entry"),
+            ("GEAR_Rope", None, 11, elsewhere + "m_Unknown > m_Target"),
+            ("GEAR_Hook", None, 17, elsewhere + "m_Unknown > m_Name"),
+            ("GEAR_Knife", None, 12, "its instance number is not stored the way this tool expects"),
+            ("GEAR_Stone", None, 13, "its instance number, 7, is too short to tell apart from other numbers"),
+            ("GEAR_Prybar", None, 14, elsewhere + "m_Inventory_Serialized > m_SerializedItems[15] > "
+                                                  "m_SerializedGear > m_InstanceIDProxy"),
+            ("GEAR_Hammer", None, 15, elsewhere + "m_Inventory_Serialized > m_SerializedItems[14] > "
+                                                  "m_SerializedGear > m_InstanceIDProxy"),
+            ("GEAR_Tinder", None, 16, "its instance number is not stored the way this tool expects"),
+            ("GEAR_Scarf", None, 18, "whether you are wearing it is not stored the way this tool expects"),
+        )
+        for prefab, entry, chosen, reason in cases:
+            with self.subTest(prefab=prefab):
+                with self.assertRaises(EditError) as refused:
+                    edit.remove_item(removal_save(), prefab, entry=entry)
+                self.assertIn(f"inventory entry {chosen} ({prefab}) is not removed: {reason}",
+                              str(refused.exception))
+
+    def test_requests_that_do_not_name_exactly_one_item_are_refused(self) -> None:
+        cases = (("GEAR_BottleAntibiotics", None, "holds 2 entries of GEAR_BottleAntibiotics"),
+                 ("GEAR_WoolSocks", None, "Add --entry to say which one"),
+                 ("GEAR_Hatchett", None, "Did you mean GEAR_Hatchet?"),
+                 ("GEAR_Hatchet", 2, "inventory entry 2 is GEAR_BottleAntibiotics, not GEAR_Hatchet"),
+                 ("GEAR_Hatchet", 40, "Entries run from 0 to 18"))
+        for prefab, entry, message in cases:
+            with self.subTest(prefab=prefab, entry=entry):
+                with self.assertRaises(EditError) as refused:
+                    edit.remove_item(removal_save(), prefab, entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.remove_item(b"not a save", "GEAR_Hatchet")
+        self.assertIn("does not pass the exact rebuild check", str(refused.exception))
+
+    def test_a_removal_of_another_item_is_caught(self) -> None:
+        # The right number of items, so the two saves differ in the length of that one list only.
+        with encoding_as(removal_save(without=1), removal_save(without=4)):
+            with self.assertRaises(EditError) as caught:
+                edit.remove_item(removal_save(), "GEAR_Hatchet")
+        self.assertIn("the inventory in the edited save is not the original one without entry 1: the item now "
+                      "at entry 1 is not the one that belongs there", str(caught.exception))
+
+    def test_a_removal_that_also_changes_another_item_is_caught(self) -> None:
+        meant = removal_save(without=1)
+        save = codec.decode_save(meant)
+        edit._inventory_items(save)[10]["m_SerializedGear"].value["m_NormalizedCondition"] = Number("0.5")
+        wrong = codec.encode_save(save)
+        with encoding_as(meant, wrong):
+            with self.assertRaises(EditError) as caught:
+                edit.remove_item(removal_save(), "GEAR_Hatchet")
+        self.assertIn("the item now at entry 10 is not the one that belongs there", str(caught.exception))
+
+    def test_a_removal_that_removes_nothing_is_caught(self) -> None:
+        with encoding_as(removal_save(without=1), removal_save()):
+            with self.assertRaises(EditError) as caught:
+                edit.remove_item(removal_save(), "GEAR_Hatchet")
+        self.assertIn("no difference at all", str(caught.exception))
+
+    def test_a_removal_of_two_items_is_caught(self) -> None:
+        save = codec.decode_save(removal_save(without=1))
+        del edit._inventory_items(save)[0]
+        two_gone = codec.encode_save(save)
+        with encoding_as(removal_save(without=1), two_gone):
+            with self.assertRaises(EditError) as caught:
+                edit.remove_item(removal_save(), "GEAR_Hatchet")
+        self.assertIn("19 items -> 17 items", str(caught.exception))
+
+    def test_the_check_of_the_inventory_counts_the_items(self) -> None:
+        with self.assertRaises(EditError) as caught:
+            edit._prove_removal(removal_save(), removal_save(), 1)
+        self.assertIn("without entry 1: 19 items where 18 were expected", str(caught.exception))
+        edit._prove_removal(removal_save(), removal_save(without=18), 18)
+        edit._prove_removal(removal_save(), removal_save(without=0), 0)
+        # Two items gone from the end: every item that is left sits where it belongs, and one is missing.
+        save = codec.decode_save(removal_save(without=18))
+        del edit._inventory_items(save)[17]
+        with self.assertRaises(EditError) as caught:
+            edit._prove_removal(removal_save(), codec.encode_save(save), 18)
+        self.assertIn("without entry 18: 17 items where 18 were expected", str(caught.exception))
+
+
 class NewFileTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -1735,7 +1918,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
         self.assertEqual(edit.NOT_TESTED_IN_GAME,
-                         frozenset({"set-liters", "set-calories", "set-rounds", "repair-all"}))
+                         frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -2040,8 +2223,89 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         self.assertFalse(self.out.exists())
 
+    def test_remove_item_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(removal_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("remove-item", str(self.save), "--item", "GEAR_Hatchet",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), removal_save(without=1))
+        self.assertIn("Item:     GEAR_Hatchet, inventory entry 1\n", out)
+        self.assertIn("Change:   removed (condition 75.0%). 18 entries are left in the inventory\n", out)
+        self.assertIn("Note:     every entry number above 1 is now one lower. Run items again before the next "
+                      "edit\n", out)
+        self.assertIn("Checked:  the edited inventory is the original one without this entry, and nothing else "
+                      "differs\n", out)
+        self.assertIn("2 of 3 entries are byte for byte unchanged", out)
+        self.assertIn("Untested: no save changed by remove-item has been loaded in the game yet", out)
+        self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_remove_item_says_what_a_stack_held(self) -> None:
+        self.save.write_bytes(removal_save())
+        code, out, _ = self.run_command("remove-item", str(self.save), "--item", "GEAR_BottleAntibiotics",
+                                        "--entry", "3", "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("Change:   removed (a stack of 12, condition 25.0%). 18 entries are left", out)
+        self.assertEqual(self.out.read_bytes(), removal_save(without=3))
+
+    def test_remove_item_with_one_entry_left_and_no_condition(self) -> None:
+        made = [item("GEAR_Stone", None, "1.0"), item("GEAR_Stick", None, "1.0")]
+        stone, stick = (one["m_SerializedGear"].value for one in made)          # type: ignore[union-attr]
+        stone["m_InstanceIDProxy"] = Number("-2002000")
+        stick["m_InstanceIDProxy"] = Number("-2002001")
+        stick["m_NormalizedCondition"] = "good"
+        inventory: Dict[str, JsonValue] = {"m_SerializedItems": list(made), "m_QuickSelectInstanceIDs": []}
+        self.save.write_bytes(build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)}))
+        code, out, _ = self.run_command("remove-item", str(self.save), "--item", "GEAR_Stick",
+                                        "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("Change:   removed (no condition). 1 entry is left in the inventory\n", out)
+
+    def test_remove_item_refusals_write_nothing(self) -> None:
+        self.save.write_bytes(removal_save())
+        existing = self.folder / "taken.edited"
+        existing.write_bytes(b"already here")
+        cases = {
+            "in the player's hands": (["--item", "GEAR_Charcoal", "--out", str(self.out)],
+                                      "it is in your hands"),
+            "worn": (["--item", "GEAR_WoolSocks", "--entry", "7", "--out", str(self.out)],
+                     "you are wearing it"),
+            "water": (["--item", "GEAR_WaterSupplyPotable", "--out", str(self.out)], "the water you carry"),
+            "several": (["--item", "GEAR_BottleAntibiotics", "--out", str(self.out)], "Add --entry"),
+            "unknown item": (["--item", "GEAR_Nope", "--out", str(self.out)], "there is no GEAR_Nope in the"),
+            "output exists": (["--item", "GEAR_Hatchet", "--out", str(existing)], "already exists"),
+        }
+        before = self.snapshot()
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                code, out, err = self.run_command("remove-item", str(self.save), *options)
+                self.assertEqual(code, 1)
+                self.assertIn("Refused:", err)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(existing.read_bytes(), b"already here")
+
+    def test_remove_item_checks_the_output_path_before_any_edit_work(self) -> None:
+        with mock.patch.object(edit, "remove_item") as attempted:
+            code, _, _ = self.run_command("remove-item", str(self.save), "--item", "GEAR_Hatchet",
+                                          "--out", str(self.folder / "sandbox16"))
+        self.assertEqual(code, 1)
+        attempted.assert_not_called()
+
+    def test_remove_item_on_a_missing_save_is_a_usage_error(self) -> None:
+        code, out, err = self.run_command("remove-item", str(self.folder / "sandbox99"), "--item", "GEAR_Stick",
+                                          "--out", str(self.out))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)], ["repair-all", str(self.save)],
+                          ["remove-item", str(self.save), "--out", str(self.out)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--out", str(self.out)],
                           ["set-liters", str(self.save), "--item", "GEAR_LampFuel", "--out", str(self.out)],
                           ["set-calories", str(self.save), "--item", "GEAR_MRE", "--out", str(self.out)],
@@ -2293,6 +2557,41 @@ class RealSaveTests(unittest.TestCase):
                 repaired += 1
         if not repaired:
             self.skipTest("no real save has an inventory item below 100%")
+
+    def test_one_item_can_be_removed_from_every_real_save(self) -> None:
+        """In memory only. No file is written."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                decoded = codec.decode_save(original)
+                before = edit.list_items(decoded)
+                target = next((one for one in before
+                               if edit._why_it_stays(decoded, one.entry, one.prefab) is None), None)
+                self.assertIsNotNone(target, "no item in this inventory may be removed")
+                result = edit.remove_item(original, target.prefab, entry=target.entry)
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                expected = [Item(one.entry - (one.entry > target.entry), one.prefab, one.count, one.condition)
+                            for one in before if one.entry != target.entry]
+                self.assertEqual(edit.list_items(codec.decode_save(result.data)), expected)
+
+    def test_what_a_real_save_points_at_is_left_in_place(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        for path in codec.find_saves(folder):
+            decoded = codec.decode_save(path.read_bytes())
+            player = decoded.entries["global"].get("m_PlayerManagerSerialized")
+            record = player.value if isinstance(player, NestedJson) else None
+            fields = ("m_ItemInHandsInstanceID", "m_LastUnequippedItemInstanceID")
+            held = {record[field].literal for field in fields
+                    if isinstance(record, dict) and isinstance(record.get(field), Number)}
+            for entry, one in enumerate(edit._inventory_items(decoded)):
+                gear = one["m_SerializedGear"].value
+                if gear["m_InstanceIDProxy"].literal in held or gear.get("m_WaterSupplySerialized") is not None:
+                    with self.subTest(save=path.name, entry=entry):
+                        self.assertIsNotNone(edit._why_it_stays(decoded, entry, one["m_PrefabName"]))
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])
