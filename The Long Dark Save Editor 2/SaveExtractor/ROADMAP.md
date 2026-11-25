@@ -12,7 +12,7 @@ change finishes or advances an item, update this file in the same pull request.
 |---|---|---|
 | F | Foundations: the tests run on GitHub, the wiki helper has tests, the folder has one decompressor, and coding agents have a context file | Done (pull requests 1 to 4) |
 | R | Reader depth: more of what a save holds, read correctly | Built (pull requests 5, 6 and 8). Open: the owner compares a few weights, liters and calories with the game's inventory screen |
-| I | Inventory edits: add an item, remove an item, repair everything, liters, calories, rounds | In progress |
+| I | Inventory edits: add an item, remove an item, repair everything, liters, calories, rounds | Built (pull requests 9 to 15), except for adding an item the inventory does not hold and film in the camera. Not tested in game. Open: the owner's session in the game, from the checklist in the block report |
 | P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | Not started |
 | Trader | The Trader: read his state (trust, contacts, offers, special requests), a report command, and one edit (trust) | Not started. The owner has not yet confirmed the place in the order or the edit |
 | T | Live tracker: where animals, corpses, Tale objects and one-of-a-kind items are as of the last game save, then a watcher that follows new saves | Not started |
@@ -37,6 +37,7 @@ change finishes or advances an item, update this file in the same pull request.
 | Repair everything in the inventory | Built (pull request 12). Not tested in game. Torches and flares that have burned are left alone |
 | Remove an item | Built (pull request 13). Not tested in game |
 | Add an item | First step built (pull request 14): `copy-item` adds another one of an item the inventory holds. Not tested in game. An item the inventory does not hold is not started: it needs a record built for each kind of item, and it waits for the in-game results |
+| Several edits put in place at once | Built (pull request 15): `apply` lists the inventory entries that an edited file adds or takes away, and every other value under its entry number in the live save. Before that, a file with an entry more or less was shown as one changed value, or as hundreds |
 
 ## What holds for every block
 

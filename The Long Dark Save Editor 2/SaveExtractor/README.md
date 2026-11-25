@@ -568,6 +568,58 @@ Checked in the game (v2.60, changelist 189457) on 2026-11-24, on a survival save
   back. The game showed 40, and the save file was byte for byte the one from before the
   test.
 
+### Several edits, then one apply
+
+An edit command reads one file and writes a new one. So edits can follow each other: give
+each command the file that the one before it wrote, and put the last file in place.
+
+```powershell
+$save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox15"
+python tld_save_edit.py set-liters $save --item GEAR_WaterSupplyPotable --liters 2.5 --out "$env:TEMP\sandbox15.step1"
+python tld_save_edit.py copy-item "$env:TEMP\sandbox15.step1" --item GEAR_Crackers --entry 11 --out "$env:TEMP\sandbox15.step2"
+python tld_save_edit.py remove-item "$env:TEMP\sandbox15.step2" --item GEAR_BirchbarkTea --entry 148 --out "$env:TEMP\sandbox15.step3"
+python tld_save_apply.py apply $save --from "$env:TEMP\sandbox15.step3" --dry-run
+```
+
+`apply` compares the last file with the live save and lists what differs before it changes
+anything. For these three edits its output starts like this:
+
+```text
+Save:       sandbox15, 585,798 bytes, last saved by the game at 2026-11-24 04:49:13
+Edited:     C:\Users\you\AppData\Local\Temp\sandbox15.step3, 585,980 bytes
+Removed:    1 inventory entry (entry numbers as in the save)
+              entry 148, GEAR_BirchbarkTea
+Added:      1 inventory entry (entry numbers as in the edited file)
+              entry 442, GEAR_Crackers
+Changes:    1 other value differs (entry numbers as in the save)
+              m_Dict > global > m_Inventory_Serialized > m_SerializedItems[1] > m_SerializedGear > m_WaterSupplySerialized > m_VolumeProxy: 2000000000 -> 2500000000
+Checked:    the game is not running
+Checked:    both files pass the exact rebuild check
+Checked:    the edited file was made from the save as it is now
+```
+
+- `Removed` lists the inventory entries that the edited file no longer holds, each under its
+  entry number in the live save. `Added` lists the entries that only the edited file holds,
+  each under its entry number in that file: the copied crackers were entry 443 after the
+  second edit, and they are entry 442 after the third, which took out an entry before them.
+  A block is left out when it has nothing to list.
+- `Changes` lists every other value that differs. It names an inventory entry by its number
+  in the live save, also when an entry before it is gone.
+- Each block shows ten lines at most and counts the rest.
+- The entries of the two inventories are matched by their instance numbers. When that cannot
+  be done, because a number is missing or occurs twice, or because the entries are in another
+  order, the inventories are compared position by position. An inventory of another length
+  is then one line under `Changes`, and nothing is listed as removed or added.
+
+Things to know about several edits in a row:
+
+- `remove-item` moves every entry number above the removed one down by one. Make it the last
+  edit, or run `items` on the file it wrote before the next edit.
+- An edit never overwrites a file, so every step needs a file name that is not taken. For a
+  second round, use other names or another folder.
+- `apply` checks the last file against the live save as it is at that moment. When the game
+  has saved since the first edit was made, it refuses, and the edits have to be made again.
+
 ## Keep the item table current
 
 Run this after a game update or after adding an item mod. It exits with 0 when every

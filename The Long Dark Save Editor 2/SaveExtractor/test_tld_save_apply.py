@@ -14,6 +14,7 @@ TLD_SAVE_DIR names their folder:
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import os
 import subprocess
@@ -71,6 +72,34 @@ def with_matches(save: bytes, count: int) -> bytes:
     return edit.set_stack_count(save, "GEAR_WoodMatches", count).data
 
 
+# (item, instance number, condition)
+Carried = Tuple[str, str, str]
+
+CARRIED: Tuple[Carried, ...] = (
+    ("GEAR_WoodMatches", "-1001000", "1.0"),
+    ("GEAR_Hatchet", "-1001002", "0.75"),
+    ("GEAR_Crackers", "1474360", "0.5"),
+    ("GEAR_Stick", "-1001006", "0.25"),
+)
+ROPE: Carried = ("GEAR_Rope", "-1001010", "1.0")
+STONE: Carried = ("GEAR_Stone", "-1001012", "1.0")
+ITEMS_PATH = "m_Dict > global > m_Inventory_Serialized > m_SerializedItems"
+
+
+def carrying(carried: Sequence[Carried]) -> bytes:
+    """The small save with these entries as its inventory, each with an instance number of its own."""
+    save = codec.decode_save(make_save())
+    save.entries["global"]["m_Inventory_Serialized"].value["m_SerializedItems"] = [
+        {"m_PrefabName": prefab, "m_SerializedGear": NestedJson(
+            {"m_InstanceIDProxy": Number(number), "m_NormalizedCondition": Number(condition)})}
+        for prefab, number, condition in carried]
+    return codec.encode_save(save)
+
+
+def condition_path(entry: int) -> str:
+    return f"{ITEMS_PATH}[{entry}] > m_SerializedGear > m_NormalizedCondition"
+
+
 def stamp(moment: datetime) -> str:
     return moment.strftime("%Y%m%d-%H%M%S")
 
@@ -111,6 +140,12 @@ class FolderCase(unittest.TestCase):
         self.assertEqual(self.live.read_bytes(), self.original)
         self.assertEqual(self.names_in(self.saves), ["sandbox15"])
         self.assertFalse(self.backups.exists(), "no backup folder should have been made")
+
+    def carry(self, live: Sequence[Carried], edited: Sequence[Carried]) -> None:
+        """Give the live save and the edited file these inventories."""
+        self.original, self.edited_data = carrying(live), carrying(edited)
+        self.live.write_bytes(self.original)
+        self.edited.write_bytes(self.edited_data)
 
     def apply_now(self, moment: datetime = NOW) -> Path:
         """Put the edited file in place. Returns the backup that was made."""
@@ -230,6 +265,31 @@ class ApplyTests(FolderCase):
         with self.assertRaisesRegex(ApplyError, "Nothing to put in place"):
             apply.plan_apply(self.live, self.edited, self.backups, now=NOW)
         self.assert_nothing_changed()
+
+    def test_entries_that_came_or_went_are_part_of_the_plan(self) -> None:
+        self.carry(CARRIED, [CARRIED[0], CARRIED[2], ("GEAR_Stick", "-1001006", "1.0"), ROPE])
+        plan = apply.plan_apply(self.live, self.edited, self.backups, now=NOW)
+        self.assertEqual(plan.removed, ((1, "GEAR_Hatchet"),))
+        self.assertEqual(plan.added, ((3, "GEAR_Rope"),))
+        # The stick is entry 3 in the live save and entry 2 in the edited file.
+        self.assertEqual(plan.changes, ((condition_path(3), "0.25", "1.0"),))
+        apply.carry_out(plan)
+        self.assertEqual(self.live.read_bytes(), self.edited_data)
+        self.assertEqual(self.backup_at(NOW).read_bytes(), self.original)
+
+    def test_an_entry_more_or_less_and_nothing_else_is_a_change_too(self) -> None:
+        for name, edited, removed, added in (("one more", list(CARRIED) + [ROPE], (), ((4, "GEAR_Rope"),)),
+                                             ("one less", CARRIED[:3], ((3, "GEAR_Stick"),), ())):
+            with self.subTest(name):
+                self.carry(CARRIED, edited)
+                plan = apply.plan_apply(self.live, self.edited, self.backups, now=NOW)
+                self.assertEqual((plan.removed, plan.added, plan.changes), (removed, added, ()))
+
+    def test_a_restore_names_no_entries(self) -> None:
+        self.carry(CARRIED, CARRIED[:3])
+        backup = self.apply_now()
+        plan = apply.plan_restore(self.live, backup, self.backups, now=NOW + timedelta(minutes=5))
+        self.assertEqual((plan.removed, plan.added, plan.changes), ((), (), ()))
 
     def test_refused_when_a_file_does_not_pass_the_rebuild_check(self) -> None:
         broken = self.original[:-1] + bytes([self.original[-1] ^ 0xFF])
@@ -664,6 +724,62 @@ class CommandTests(FolderCase):
         self.assertEqual(out.count(" -> "), 10)
         self.assertIn("              and 4 more\n", out)
 
+    def test_entries_that_came_or_went_are_listed_before_the_values(self) -> None:
+        self.carry(CARRIED, [CARRIED[0], CARRIED[2], ROPE, ("GEAR_Stick", "-1001006", "1.0"), STONE])
+        code, out, err = self.run_command(*self.apply_arguments("--dry-run"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[2:10], [
+            "Removed:    1 inventory entry (entry numbers as in the save)",
+            "              entry 1, GEAR_Hatchet",
+            "Added:      2 inventory entries (entry numbers as in the edited file)",
+            "              entry 2, GEAR_Rope",
+            "              entry 4, GEAR_Stone",
+            "Changes:    1 other value differs (entry numbers as in the save)",
+            f"              {condition_path(3)}: 0.25 -> 1.0",
+            "Checked:    the game is not running"])
+        self.assert_nothing_changed()
+
+    def test_several_other_values_are_counted(self) -> None:
+        self.carry(CARRIED, [("GEAR_WoodMatches", "-1001000", "0.5"), CARRIED[1],
+                             ("GEAR_Stick", "-1001006", "1.0")])
+        code, out, err = self.run_command(*self.apply_arguments("--dry-run"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[2:7], [
+            "Removed:    1 inventory entry (entry numbers as in the save)",
+            "              entry 2, GEAR_Crackers",
+            "Changes:    2 other values differ (entry numbers as in the save)",
+            f"              {condition_path(0)}: 1.0 -> 0.5",
+            f"              {condition_path(3)}: 0.25 -> 1.0"])
+        self.assertNotIn("Added:", out)
+
+    def test_an_entry_more_and_nothing_else_says_so(self) -> None:
+        self.carry(CARRIED, list(CARRIED) + [ROPE])
+        code, out, err = self.run_command(*self.apply_arguments())
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[2:6], [
+            "Added:      1 inventory entry (entry numbers as in the edited file)",
+            "              entry 4, GEAR_Rope",
+            "Changes:    no other value differs",
+            "Checked:    the game is not running"])
+        self.assertNotIn("Removed:", out)
+        self.assertEqual(self.live.read_bytes(), self.edited_data)
+
+    def test_many_entries_are_cut_short(self) -> None:
+        many = [(f"GEAR_Old{number}", str(-2001000 - 2 * number), "1.0") for number in range(12)]
+        more = [(f"GEAR_New{number}", str(-3001000 - 2 * number), "1.0") for number in range(11)]
+        self.carry(list(CARRIED) + many, list(CARRIED) + more)
+        code, out, err = self.run_command(*self.apply_arguments("--dry-run"))
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        self.assertEqual(lines[2], "Removed:    12 inventory entries (entry numbers as in the save)")
+        self.assertEqual(lines[3:13], [f"              entry {4 + number}, GEAR_Old{number}"
+                                       for number in range(10)])
+        self.assertEqual(lines[13], "              and 2 more")
+        self.assertEqual(lines[14], "Added:      11 inventory entries (entry numbers as in the edited file)")
+        self.assertEqual(lines[15:25], [f"              entry {4 + number}, GEAR_New{number}"
+                                        for number in range(10)])
+        self.assertEqual(lines[25:27], ["              and 1 more", "Changes:    no other value differs"])
+
     def test_a_missing_file_is_a_usage_error(self) -> None:
         gone = str(self.saves / "sandbox99")
         for arguments in (("apply", gone, "--from", str(self.edited)),
@@ -780,6 +896,50 @@ class RealSaveTests(unittest.TestCase):
         listed_after = sorted((path.name, path.stat().st_size, path.stat().st_mtime_ns)
                               for path in folder.iterdir() if path.is_file())
         self.assertEqual(listed_after, listed_before, "the real save folder must not change")
+
+    def test_entries_that_come_and_go_in_every_real_save_are_planned_entry_by_entry(self) -> None:
+        """Works on copies in a temporary folder. The real saves are only read.
+
+        In each save one inventory entry goes, a copy of one comes at the end under a new instance
+        number, and the condition of the last entry that stays is changed. The two inventories are
+        then of one length, and the plan must name exactly those three things, the condition
+        under its entry number in the real save.
+        """
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        with mock.patch.object(apply, "running_process_names", return_value=list(NO_GAME)):
+            for path in saves:
+                with self.subTest(save=path.name), tempfile.TemporaryDirectory() as temporary:
+                    original = path.read_bytes()
+                    save = codec.decode_save(original)
+                    items = edit._inventory_items(save)
+                    count = len(items)
+                    self.assertGreaterEqual(count, 3)
+                    names = [one["m_PrefabName"] for one in items]
+                    new_number = edit._unused_number(save)
+                    gone, source, changed = 0, count // 2, count - 1
+                    gear = items[changed]["m_SerializedGear"].value
+                    old = gear["m_NormalizedCondition"].literal
+                    new = "0.5" if old != "0.5" else "0.25"
+                    gear["m_NormalizedCondition"] = Number(new)
+                    made = copy.deepcopy(items[source])
+                    made["m_SerializedGear"].value["m_InstanceIDProxy"] = Number(str(new_number))
+                    items.append(made)
+                    del items[gone]
+
+                    root = Path(temporary)
+                    live = root / "Survival" / path.name
+                    live.parent.mkdir()
+                    live.write_bytes(original)
+                    edited = root / f"{path.name}.edited"
+                    edited.write_bytes(codec.encode_save(save))
+                    plan = apply.plan_apply(live, edited, root / "kept", now=NOW)
+                    self.assertEqual(plan.removed, ((gone, names[gone]),))
+                    self.assertEqual(plan.added, ((count - 1, names[source]),))
+                    self.assertEqual(plan.changes, ((condition_path(changed), old, new),))
+                    self.assertEqual(live.read_bytes(), original)
+                    self.assertEqual(path.read_bytes(), original, "the real save must not change")
 
 
 if __name__ == "__main__":
