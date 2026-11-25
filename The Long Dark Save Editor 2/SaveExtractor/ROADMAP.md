@@ -31,7 +31,7 @@ change finishes or advances an item, update this file in the same pull request.
 | Item | State |
 |---|---|
 | Liters: the liquid an inventory item holds | Built (pull request 9). Not tested in game |
-| Calories of a food item | Not started |
+| Calories of a food item | Built (pull request 10). Not tested in game |
 | Rounds in a weapon | Not started |
 | Repair everything in the inventory | Not started |
 | Remove an item | Not started |
