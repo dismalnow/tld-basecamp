@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it |
+| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -460,8 +460,8 @@ Three checks stand between an edit and a written file. If one fails, nothing is 
 1. The original must pass `tld_save_codec.py verify`.
 2. The edited save, decoded again, must differ from the original in exactly what was asked
    for: one value, for `repair-all` one condition for each repaired item, for `remove-item`
-   one inventory entry less, and for `copy-item` one more. Every other entry must be byte
-   for byte unchanged.
+   one inventory entry less, for `copy-item` one more, and for `set-player` one value for
+   each option. Every other entry must be byte for byte unchanged.
 3. The new file is read back and compared with what was meant to be written.
 
 The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
@@ -496,6 +496,81 @@ Checked in the game (v2.60, changelist 189457) on a survival save:
   save held 100% with the hit points worked out again, from 52.5 to 75.0.
 
 Both of those saves, as the game wrote them, pass `verify`.
+
+## Change the player's condition and needs
+
+`tld_save_edit.py` also changes the player's own values: condition, calories, and the three
+bars for thirst, fatigue and cold. As with the inventory, the save you name is only read,
+the result goes to a new file, and the three checks above stand in between.
+
+Not tested in the game yet: nobody has loaded a save changed by `set-player`. Try it on a
+save you can afford to lose.
+
+```powershell
+$save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox6"
+python tld_save_edit.py player $save
+python tld_save_edit.py set-player $save --condition 100 --calories 2500 --hydration 100 --rest 100 --out "$env:TEMP\sandbox6.edited"
+```
+
+`player` lists the five values, each the way the game shows it and the way the save holds it:
+
+```text
+value      in the game        in the save
+condition  60.6%              m_CurrentHPProxy 60.6337242
+calories   2453.3             m_CurrentReserveCaloriesProxy 2453.29224
+hydration  90.3% of the bar   m_CurrentThirstProxy 9.663491
+rest       38.4% of the bar   m_CurrentFatigueProxy 61.640625
+warmth     100.0% of the bar  m_CurrentFreezingProxy is left out, which means 0
+The player's 5 values in sandbox6.
+For hydration, rest and warmth the save holds the inverse of the bar: 0 is a full bar, and 100 an empty one.
+```
+
+`set-player` takes one or more of these options and changes them in one edit:
+
+| Option | What it sets | From | To |
+|---|---|---|---|
+| `--condition` | The player's condition, in percent | 1 | 100 |
+| `--calories` | The calories the player has in store | 0 | 2500 |
+| `--hydration` | The thirst bar, in percent of a full bar. 100 is not thirsty at all | 0 | 100 |
+| `--rest` | The fatigue bar, in percent of a full bar. 100 is fully rested | 0 | 100 |
+| `--warmth` | The cold bar, in percent of a full bar. 100 is warm | 0 | 100 |
+
+```text
+Save:     sandbox6, 291,658 bytes, passes the exact rebuild check
+Change:   condition 60.6% -> 100.0% (stored as m_CurrentHPProxy 60.6337242 -> 100.0)
+Change:   calories 2453.3 -> 2500.0 (stored as m_CurrentReserveCaloriesProxy 2453.29224 -> 2500.0)
+Change:   hydration 90.3% of the bar -> 100.0% of the bar (stored as m_CurrentThirstProxy 9.663491 -> 0.0)
+Change:   rest 38.4% of the bar -> 100.0% of the bar (stored as m_CurrentFatigueProxy 61.640625 -> 0.0)
+Checked:  the edited save differs from the original in exactly these 4 values
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by set-player has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox6.edited, 291,695 bytes
+SHA-256:  ac45e1d7e442b55bd1815bb3da4e9a17bebb0d944f63b95e2d110ca6ebfdfd95
+sandbox6 itself was not changed.
+```
+
+Things to know about the player's values:
+
+- Every number is given the way the game shows it, so 100 is the best number for all five.
+  The save holds thirst, fatigue and cold the other way round: 0 is a full bar, and 100 an
+  empty one. The game's wiki says so of thirst: it "is actually the inverse of what is
+  displayed". So `--hydration 80` is written as a thirst of 20, and the `Change` line shows
+  both. In one of 14 real saves all three had been set to 100 with another editor, which is
+  dehydrated, exhausted and freezing.
+- The game leaves a number out of a save when it is 0, and `player` then says `is left out,
+  which means 0`. In the 14 real saves that is so for the cold in seven, and for the fatigue
+  in one. `set-player` refuses such a value for now, because setting it would add a field to
+  the save and not change a value. That step is next: see `ROADMAP.md`.
+- The numbers are written as 32-bit floats, the way the game writes them (checked against
+  all 62 numbers that the 14 real saves hold for these five values).
+- Only the numbers change. Next to each one the save keeps what the character last said
+  about it and whether it is in the journal, in fields such as
+  `m_ThirstLevelForPreviousVoiceOver` and `m_DehydratedInLog`. Those are left alone. What the
+  game makes of a full thirst bar next to a note that says "dehydrated" is not known.
+- The limits are what the real saves show. Their calories run from 423 to 2,491. One of them
+  holds a condition of 105 while the Well Fed bonus is active, and the tool stops at 100.
+- A number that would leave less than 0.0001 in the save, such as `--hydration 99.99999`, is
+  refused. The game writes numbers that small in another form. Use 100.
 
 ## Put an edited save in place, or put a backup back
 
