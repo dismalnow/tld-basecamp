@@ -9,6 +9,7 @@ Usage:
     python tld_save_edit.py foods SAVE
     python tld_save_edit.py weapons SAVE
     python tld_save_edit.py player SAVE
+    python tld_save_edit.py skills SAVE
     python tld_save_edit.py set-count SAVE --item GEAR_NAME --count N --out NEW_FILE [--entry N]
     python tld_save_edit.py set-condition SAVE --item GEAR_NAME --condition PERCENT --out NEW_FILE [--entry N]
     python tld_save_edit.py set-liters SAVE --item GEAR_NAME --liters LITERS --out NEW_FILE [--entry N]
@@ -20,6 +21,7 @@ Usage:
     python tld_save_edit.py set-player SAVE [--condition PERCENT] [--calories CALORIES]
                                             [--hydration PERCENT] [--rest PERCENT] [--warmth PERCENT]
                                             --out NEW_FILE
+    python tld_save_edit.py set-skill SAVE --skill NAME --points N --out NEW_FILE
 
 items lists everything in the player's inventory: entry number, item, count, condition.
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
@@ -39,8 +41,11 @@ the game shows it, so 100 is a full bar: --hydration 100 is not thirsty at all, 
 is fully rested, and --warmth 100 is warm. The game leaves a number out of the save when it
 is 0, and set-player puts such a number in where the game writes it.
 
-set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item and set-player have
-not been tested in the game yet. Their own output says so.
+skills lists the points of the nine skills, and set-skill changes the points of one. The
+save holds points and no level.
+
+set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item, set-player and
+set-skill have not been tested in the game yet. Their own output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -52,6 +57,8 @@ Three checks stand between an edit and a written file:
        asked for: one value, for repair-all one condition for each repaired item, for
        remove-item one inventory entry less, for copy-item one more, and for set-player
        one value for each option. Every other entry must be byte for byte unchanged.
+       When an edit puts in a number the game had left out, the record that got it is
+       checked field by field as well.
     3. The file on disk is read back and compared with what was meant to be written.
 If a check fails, nothing is left on disk.
 
@@ -84,6 +91,7 @@ MAX_CONDITION = 100.0    # percent
 MAX_LITERS = 999         # far above anything the game holds. The limit only catches a slip of the hand
 MIN_CALORIES = 1.0       # an item with nothing left is one the game removes
 MAX_CALORIES = 9999.0    # the most in 14 real saves is 1750. The limit only catches a slip of the hand
+MAX_SKILL_POINTS = 9999  # the most in 14 real saves is 264. The limit only catches a slip of the hand
 
 # Rounds a firearm holds at once. A save does not say. The rifle and the revolver are from the
 # game's wiki, and real saves agree: a rifle with 10 rounds, and revolvers whose rounds and spent
@@ -98,7 +106,7 @@ ROUNDS_HELD: Dict[str, int] = {
 
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
 NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item",
-                                "copy-item", "set-player"})
+                                "copy-item", "set-player", "set-skill"})
 
 Difference = Tuple[str, str, str]
 
@@ -1497,15 +1505,14 @@ def _player_path(name: str) -> str:
     return f"{_player_record_path(name)} > {PLAYER_VALUES[name].field}"
 
 
-def _prove_number_put_in(original: bytes, edited: bytes, name: str, new: str) -> None:
-    """Decode both saves afresh and confirm that one record got one number more, in front, and no other change.
+def _prove_put_in(before: Optional[Dict[str, JsonValue]], after: Optional[Dict[str, JsonValue]],
+                  record: str, field: str, new: str) -> None:
+    """Confirm that a record got one number more, in front, and no other change.
 
-    The comparison of two saves reports a record with another set of fields as one difference
-    and does not look inside it. So every field the record had is compared here.
+    before and after are that record in the original save and in the edited one, each decoded
+    afresh. The comparison of two saves reports a record with another set of fields as one
+    difference and does not look inside it. So every field the record had is compared here.
     """
-    field = PLAYER_VALUES[name].field
-    before = _player_record(codec.decode_save(original), name)
-    after = _player_record(codec.decode_save(edited), name)
     problem = None
     if before is None or after is None:
         problem = "the record cannot be read"
@@ -1518,8 +1525,15 @@ def _prove_number_put_in(original: bytes, edited: bytes, name: str, new: str) ->
         if changed:
             problem = f"{changed[0]} changed as well"
     if problem is not None:
-        raise EditError(f"safety check failed: {PLAYER_VALUES[name].record} in the edited save is not the "
-                        f"original one with {field} {new} put in front: {problem}")
+        raise EditError(f"safety check failed: {record} in the edited save is not the original one with "
+                        f"{field} {new} put in front: {problem}")
+
+
+def _prove_number_put_in(original: bytes, edited: bytes, name: str, new: str) -> None:
+    """Decode both saves afresh and run that check for one of the player's values."""
+    where = PLAYER_VALUES[name]
+    _prove_put_in(_player_record(codec.decode_save(original), name),
+                  _player_record(codec.decode_save(edited), name), where.record, where.field, new)
 
 
 def stored_player_value(name: str, value: float) -> str:
@@ -1603,6 +1617,132 @@ def set_player_values(original: bytes, values: Dict[str, float]) -> PlayerEdit:
         if old is None:
             _prove_number_put_in(original, edited, name, new)
     return PlayerEdit(edited, tuple(changes), entries, unchanged)
+
+
+# ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
+
+_SKILLS_RECORD = "m_SkillsManagerSerialized"
+_SKILL_POINTS = "m_Points"
+
+# The nine skills by the names this tool takes, and the record of each one in the save.
+SKILLS: Dict[str, str] = {
+    "fire-starting": "m_Skill_FirestartingSerialized",
+    "carcass-harvesting": "m_Skill_CarcassHarvestingSerialized",
+    "cooking": "m_Skill_CookingSerialized",
+    "ice-fishing": "m_Skill_IceFishingSerialized",
+    "rifle": "m_Skill_RifleSerialized",
+    "archery": "m_Skill_ArcherySerialized",
+    "mending": "m_Skill_ClothingRepairSerialized",
+    "revolver": "m_Skill_RevolverSerialized",
+    "gunsmithing": "m_Skill_GunsmithingSerialized",
+}
+
+
+@dataclass(frozen=True)
+class Skill:
+    """The points of one skill.
+
+    stored and points are both there for a number the save holds. With stored missing and 0
+    points, the game left the number out, which it does for 0. With points missing, the number
+    cannot be read.
+    """
+    name: str                # the name this tool takes, for example cooking
+    record: str              # the record of the skill in the save
+    stored: Optional[str]    # the points as the save holds them
+    points: Optional[int]
+
+
+def _skill_record(save: DecodedSave, name: str) -> Optional[Dict[str, JsonValue]]:
+    """The record of one skill. None when it is not stored as expected."""
+    document = save.entries.get("global")
+    manager = document.get(_SKILLS_RECORD) if isinstance(document, dict) else None
+    skills = manager.value if isinstance(manager, NestedJson) else None
+    record = skills.get(SKILLS[name]) if isinstance(skills, dict) else None
+    content = record.value if isinstance(record, NestedJson) else None
+    return content if isinstance(content, dict) else None
+
+
+def list_skills(save: DecodedSave) -> List[Skill]:
+    """The points of the nine skills. Points that the game left out of the save count as 0."""
+    listed: List[Skill] = []
+    for name, where in SKILLS.items():
+        record = _skill_record(save, name)
+        if record is None:
+            listed.append(Skill(name, where, None, None))
+        elif _SKILL_POINTS not in record:
+            listed.append(Skill(name, where, None, 0))
+        else:
+            held = record[_SKILL_POINTS]
+            listed.append(Skill(name, where, held.literal if isinstance(held, Number) else None, _whole(held)))
+    return listed
+
+
+@dataclass(frozen=True)
+class SkillEdit:
+    data: bytes                  # the edited save
+    skill: str
+    old_points: Optional[str]    # as stored. None for points the game had left out, which the edit put in
+    new_points: str
+    entries: int                 # entries in the save
+    unchanged_entries: int       # entries that are byte for byte the original
+
+
+def _skill_path(name: str) -> str:
+    return f"{codec.ENTRY_TABLE} > global > {_SKILLS_RECORD} > {SKILLS[name]}"
+
+
+def set_skill_points(original: bytes, skill: str, points: int) -> SkillEdit:
+    """Return the save with the points of one skill changed. Reads and writes no file.
+
+    Raises EditError for a name that is no skill, for points outside 0 to MAX_SKILL_POINTS, for
+    a skill whose points the save does not hold as a plain whole number, and for the points
+    the save holds already. Points that the game left out of the save, which it does for 0,
+    are put in as the first field of the skill's record, where the game writes them.
+    """
+    if skill not in SKILLS:
+        close = difflib.get_close_matches(skill, list(SKILLS), n=1)
+        raise EditError(f"there is no skill named {skill}. " + (f"Did you mean {close[0]}? " if close else "")
+                        + "The skills are " + ", ".join(SKILLS))
+    if isinstance(points, bool) or not isinstance(points, int) or not 0 <= points <= MAX_SKILL_POINTS:
+        raise EditError(f"the points must be a whole number from 0 to {MAX_SKILL_POINTS}, not {points}")
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    record = _skill_record(save, skill)
+    if record is None:
+        raise EditError(f"the skill {skill} is not stored the way this tool expects ({SKILLS[skill]}), so it "
+                        "is not changed")
+    new = str(points)
+    if _SKILL_POINTS not in record:
+        if points == 0:
+            raise EditError(f"{skill} has 0 points already: the game leaves {_SKILL_POINTS} out of the save "
+                            "when it is 0. Nothing to change")
+        fields = list(record.items())
+        record.clear()
+        record[_SKILL_POINTS] = Number(new)
+        record.update(fields)
+        expected = (_skill_path(skill), "fields " + ", ".join(key for key, _ in fields),
+                    "fields " + ", ".join(record))
+        old: Optional[str] = None
+    else:
+        held = record[_SKILL_POINTS]
+        if _whole(held) is None:
+            raise EditError(f"the points of {skill} are not stored as a plain whole number, so they are not "
+                            "changed")
+        if _whole(held) == points:
+            raise EditError(f"{skill} has {points} points already. Nothing to change")
+        record[_SKILL_POINTS] = Number(new)
+        old = _show(held)
+        expected = (f"{_skill_path(skill)} > {_SKILL_POINTS}", old, new)
+    edited = codec.encode_save(save)
+    entries, unchanged = _prove_single_change(original, edited, expected)
+    if old is None:
+        _prove_put_in(_skill_record(codec.decode_save(original), skill),
+                      _skill_record(codec.decode_save(edited), skill), SKILLS[skill], _SKILL_POINTS, new)
+    return SkillEdit(edited, skill, old, new, entries, unchanged)
 
 
 # ---------------------------------------------------------------------------
@@ -1822,6 +1962,64 @@ def _run_player_edit(path: Path, out: Path, values: Dict[str, float]) -> int:
     return 0
 
 
+def _run_skills(path: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        listed = list_skills(codec.decode_save(data))
+    except codec.SaveFormatError as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        return 1
+    width = max(len(name) for name in SKILLS)
+    print(f"{'skill':<{width}}  points  in the save")
+    for skill in listed:
+        if skill.points is None:
+            points, stored = "", f"cannot be read: {skill.record} is not stored the way this tool expects"
+        elif skill.stored is None:
+            points, stored = "0", f"{_SKILL_POINTS} is left out, which means 0"
+        else:
+            points, stored = str(skill.points), f"{_SKILL_POINTS} {skill.stored}"
+        print(f"{skill.name:<{width}}  {points:>6}  {stored}")
+    print(f"The {len(listed)} skills in {path.name}.")
+    print("The save holds points and no level. The game works the level out from the points.")
+    return 0
+
+
+def _run_skill_edit(path: Path, out: Path, skill: str, points: int) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        check_new_file_path(out)
+        edit = set_skill_points(data, skill, points)
+        write_new_file(out, edit.data)
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 1
+    print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
+    print(f"Skill:    {edit.skill} ({SKILLS[edit.skill]})")
+    if edit.old_points is None:
+        print(f"Change:   points 0 -> {edit.new_points} (the game had left {_SKILL_POINTS} out of the save, "
+              f"which means 0. It is put in as {edit.new_points})")
+    else:
+        print(f"Change:   points {edit.old_points} -> {edit.new_points}")
+    print("Checked:  the edited save differs from the original in exactly this one value")
+    if edit.old_points is None:
+        print("Checked:  the number that was put in is the first in its record, where the game writes it, "
+              "and nothing else in that record differs")
+    print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
+          "(all except global)")
+    if "set-skill" in NOT_TESTED_IN_GAME:
+        print("Untested: no save changed by set-skill has been loaded in the game yet. Try it on a save "
+              "you can afford to lose")
+    print(f"Written:  {out}, {len(edit.data):,} bytes")
+    print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
+    print(f"{path.name} itself was not changed.")
+    return 0
+
+
 def _percent(stored: str) -> str:
     return f"{float(stored) * 100:.1f}%"
 
@@ -1989,6 +2187,8 @@ Examples:
   python tld_save_edit.py copy-item sandbox15 --item GEAR_MRE --out sandbox15.edited
   python tld_save_edit.py player sandbox15
   python tld_save_edit.py set-player sandbox15 --condition 100 --hydration 100 --out sandbox15.edited
+  python tld_save_edit.py skills sandbox15
+  python tld_save_edit.py set-skill sandbox15 --skill cooking --points 150 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -2000,7 +2200,8 @@ option was wrong.
                        ("liquids", "list the inventory items that hold liquid"),
                        ("foods", "list the inventory items with calories"),
                        ("weapons", "list the inventory items that can hold rounds"),
-                       ("player", "list the player's condition, calories, hydration, rest and warmth")):
+                       ("player", "list the player's condition, calories, hydration, rest and warmth"),
+                       ("skills", "list the points of the nine skills")):
         listing = commands.add_parser(name, help=text)
         listing.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
     set_count = commands.add_parser("set-count", help="change the count of one inventory stack")
@@ -2109,9 +2310,22 @@ option was wrong.
                                      + (f". {limits.high:g} is {best}" if best else ""))
     set_player.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                             help="the file to create. It must not exist yet")
+    set_skill = commands.add_parser("set-skill", help="change the points of one skill "
+                                                      "(not tested in the game yet)")
+    set_skill.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
+    set_skill.add_argument("--skill", required=True, metavar="NAME",
+                           help="the skill, as skills prints it: " + ", ".join(SKILLS))
+    set_skill.add_argument("--points", required=True, type=int, metavar="N",
+                           help=f"the new points, from 0 to {MAX_SKILL_POINTS}")
+    set_skill.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                           help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command == "player":
         return _run_player(args.save)
+    if args.command == "skills":
+        return _run_skills(args.save)
+    if args.command == "set-skill":
+        return _run_skill_edit(args.save, args.out, args.skill, args.points)
     if args.command == "set-player":
         chosen = {name: getattr(args, name) for name in PLAYER_VALUES if getattr(args, name) is not None}
         if not chosen:

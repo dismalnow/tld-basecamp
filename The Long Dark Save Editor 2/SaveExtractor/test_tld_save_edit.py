@@ -28,7 +28,7 @@ from unittest import mock
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import EditError, Food, Item, Liquid, PlayerValue, Stack, Weapon
+from tld_save_edit import EditError, Food, Item, Liquid, PlayerValue, Skill, Stack, Weapon
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -2361,6 +2361,323 @@ class SetPlayerTests(unittest.TestCase):
         self.assertIn("m_CurrentThirstProxy: 21.7523441 -> 0.0", message)
 
 
+# The nine skills in the order of the save: (the name this tool takes, the record of the skill).
+SKILL_RECORDS: Tuple[Tuple[str, str], ...] = (
+    ("fire-starting", "m_Skill_FirestartingSerialized"),
+    ("carcass-harvesting", "m_Skill_CarcassHarvestingSerialized"),
+    ("cooking", "m_Skill_CookingSerialized"),
+    ("ice-fishing", "m_Skill_IceFishingSerialized"),
+    ("rifle", "m_Skill_RifleSerialized"),
+    ("archery", "m_Skill_ArcherySerialized"),
+    ("mending", "m_Skill_ClothingRepairSerialized"),
+    ("revolver", "m_Skill_RevolverSerialized"),
+    ("gunsmithing", "m_Skill_GunsmithingSerialized"),
+)
+# The points the save holds for each of them. None: the game left the number out, as it does for 0.
+SKILL_POINTS: Dict[str, Optional[str]] = {
+    "fire-starting": "12", "carcass-harvesting": None, "cooking": "264", "ice-fishing": None, "rifle": None,
+    "archery": "22", "mending": None, "revolver": None, "gunsmithing": None}
+SKILL_NAMES = ", ".join(name for name, _ in SKILL_RECORDS)
+
+
+def skills_save(points: Optional[Dict[str, JsonValue]] = None, records: Optional[Dict[str, JsonValue]] = None,
+                hours: str = "0.783333361", document: Optional[Dict[str, JsonValue]] = None) -> bytes:
+    """A save with the records of the nine skills, the way the game writes them.
+
+    points gives what a record holds as its points, by the name of the skill: text for a number,
+    None to leave the number out, or any other value to put in its place. records puts another
+    value where the record of a skill belongs, by the name of the record. hours is the one other
+    number a skill record holds, in the record of carcass harvesting. document puts other values
+    into the global entry, by the name of the field.
+    """
+    held: Dict[str, JsonValue] = dict(SKILL_POINTS)
+    held.update(points or {})
+    skills: Dict[str, JsonValue] = {}
+    for name, record in SKILL_RECORDS:
+        content: Dict[str, JsonValue] = {}
+        if held[name] is not None:
+            content["m_Points"] = Number(held[name]) if isinstance(held[name], str) else held[name]
+        if name == "carcass-harvesting":
+            content["m_NumHoursToConvertToSkillPoints"] = Number(hours)
+        skills[record] = NestedJson(content)
+    skills.update(records or {})
+    whole: Dict[str, JsonValue] = {
+        "m_SkillsManagerSerialized": NestedJson(skills),
+        # Another record with "skill" in its name, which is not one of the nine skills.
+        "m_PlayerSkillsSerialized": NestedJson({"m_RepairSkill": Number("60"), "m_CleanSkill": Number("30"),
+                                                "m_SharpenSkill": Number("30")}),
+        "m_Inventory_Serialized": NestedJson(
+            {"m_SerializedItems": [item(*spec) for spec in DEFAULT_ITEMS], "m_QuickSelectInstanceIDs": []}),
+    }
+    whole.update(document or {})
+    return build_save(global_document=whole)
+
+
+def skill_path(name: str) -> str:
+    return f"m_Dict > global > m_SkillsManagerSerialized > {dict(SKILL_RECORDS)[name]}"
+
+
+def slot_differences(before: bytes, after: bytes) -> List[Tuple[str, str, str]]:
+    return list(edit.differences(codec.decode_save(before).slot, codec.decode_save(after).slot))
+
+
+class SkillListTests(unittest.TestCase):
+    def listed(self, save: bytes) -> List[Skill]:
+        return edit.list_skills(codec.decode_save(save))
+
+    def test_the_nine_skills_are_listed_in_the_order_of_the_save(self) -> None:
+        self.assertEqual(self.listed(skills_save()), [
+            Skill("fire-starting", "m_Skill_FirestartingSerialized", "12", 12),
+            Skill("carcass-harvesting", "m_Skill_CarcassHarvestingSerialized", None, 0),
+            Skill("cooking", "m_Skill_CookingSerialized", "264", 264),
+            Skill("ice-fishing", "m_Skill_IceFishingSerialized", None, 0),
+            Skill("rifle", "m_Skill_RifleSerialized", None, 0),
+            Skill("archery", "m_Skill_ArcherySerialized", "22", 22),
+            Skill("mending", "m_Skill_ClothingRepairSerialized", None, 0),
+            Skill("revolver", "m_Skill_RevolverSerialized", None, 0),
+            Skill("gunsmithing", "m_Skill_GunsmithingSerialized", None, 0),
+        ])
+
+    def test_the_tool_takes_the_nine_skills_by_these_names(self) -> None:
+        self.assertEqual(tuple(edit.SKILLS.items()), SKILL_RECORDS)
+
+    def test_a_zero_the_save_holds_is_read_as_zero(self) -> None:
+        # The old C# editor writes every number of a record, a 0 as well.
+        skills = self.listed(skills_save({"rifle": "0", "carcass-harvesting": "57"}))
+        self.assertEqual(skills[4], Skill("rifle", "m_Skill_RifleSerialized", "0", 0))
+        self.assertEqual(skills[1],
+                         Skill("carcass-harvesting", "m_Skill_CarcassHarvestingSerialized", "57", 57))
+
+    def test_skills_that_cannot_be_read_are_marked(self) -> None:
+        cooking = "m_Skill_CookingSerialized"
+        cases = {
+            "no record": (skills_save(records={cooking: None}), None),
+            "a record that is no nested document": (skills_save(records={cooking: {"m_Points": Number("3")}}),
+                                                    None),
+            "a nested document that is no record": (skills_save(records={cooking: NestedJson([])}), None),
+            "points with a fraction": (skills_save({"cooking": "3.5"}), "3.5"),
+            "points below zero": (skills_save({"cooking": "-3"}), "-3"),
+            "text": (skills_save(records={cooking: NestedJson({"m_Points": "3"})}), None),
+            "true": (skills_save({"cooking": True}), None),
+        }
+        for name, (save, stored) in cases.items():
+            with self.subTest(name):
+                skills = self.listed(save)
+                self.assertEqual(skills[2], Skill("cooking", cooking, stored, None))
+                # The other eight are read as before.
+                self.assertEqual([skill for skill in skills if skill.name != "cooking"],
+                                 [skill for skill in self.listed(skills_save()) if skill.name != "cooking"])
+
+    def test_no_skill_can_be_read_without_the_record_that_holds_the_nine(self) -> None:
+        # The nine records as they are in a save, only not inside a nested document.
+        plain: Dict[str, JsonValue] = {record: NestedJson({"m_Points": Number("5")})
+                                       for _, record in SKILL_RECORDS}
+        for name, manager in (("nothing", None), ("no nested document", plain),
+                              ("a nested document that is no record", NestedJson([]))):
+            with self.subTest(name):
+                skills = self.listed(skills_save(document={"m_SkillsManagerSerialized": manager}))
+                self.assertEqual([(skill.name, skill.stored, skill.points) for skill in skills],
+                                 [(skill, None, None) for skill, _ in SKILL_RECORDS])
+
+
+class SetSkillTests(unittest.TestCase):
+    def refusal(self, skill: str, points: int, save: Optional[bytes] = None) -> str:
+        with self.assertRaises(EditError) as refused:
+            edit.set_skill_points(skills_save() if save is None else save, skill, points)
+        return str(refused.exception)
+
+    def test_changes_exactly_one_value(self) -> None:
+        original = skills_save()
+        result = edit.set_skill_points(original, "cooking", 150)
+        self.assertEqual((result.skill, result.old_points, result.new_points), ("cooking", "264", "150"))
+        # Built independently, with that one number.
+        self.assertEqual(result.data, skills_save({"cooking": "150"}))
+        self.assertEqual(slot_differences(original, result.data),
+                         [(skill_path("cooking") + " > m_Points", "264", "150")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_every_skill_can_be_changed(self) -> None:
+        original = skills_save()
+        for name, _ in SKILL_RECORDS:
+            with self.subTest(name):
+                result = edit.set_skill_points(original, name, 77)
+                self.assertEqual((result.skill, result.old_points, result.new_points),
+                                 (name, SKILL_POINTS[name], "77"))
+                self.assertEqual(result.data, skills_save({name: "77"}))
+
+    def test_points_the_game_left_out_are_put_into_an_empty_record(self) -> None:
+        original = skills_save()
+        result = edit.set_skill_points(original, "rifle", 40)
+        self.assertEqual((result.skill, result.old_points, result.new_points), ("rifle", None, "40"))
+        self.assertEqual(result.data, skills_save({"rifle": "40"}))
+        self.assertEqual(slot_differences(original, result.data),
+                         [(skill_path("rifle"), "fields ", "fields m_Points")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_points_the_game_left_out_are_put_in_front_of_what_the_record_holds(self) -> None:
+        original = skills_save()
+        result = edit.set_skill_points(original, "carcass-harvesting", 7)
+        self.assertEqual((result.old_points, result.new_points), (None, "7"))
+        # Built independently: the builder writes the points first in the record, as the game does.
+        self.assertEqual(result.data, skills_save({"carcass-harvesting": "7"}))
+        self.assertEqual(slot_differences(original, result.data),
+                         [(skill_path("carcass-harvesting"), "fields m_NumHoursToConvertToSkillPoints",
+                           "fields m_Points, m_NumHoursToConvertToSkillPoints")])
+
+    def test_points_next_to_another_number_change_alone(self) -> None:
+        original = skills_save({"carcass-harvesting": "57"})
+        result = edit.set_skill_points(original, "carcass-harvesting", 58)
+        self.assertEqual(result.data, skills_save({"carcass-harvesting": "58"}))
+        self.assertEqual(slot_differences(original, result.data),
+                         [(skill_path("carcass-harvesting") + " > m_Points", "57", "58")])
+
+    def test_the_ends_of_the_range(self) -> None:
+        self.assertEqual(edit.set_skill_points(skills_save(), "cooking", 0).data, skills_save({"cooking": "0"}))
+        self.assertEqual(edit.set_skill_points(skills_save(), "cooking", 9999).data,
+                         skills_save({"cooking": "9999"}))
+        self.assertEqual(edit.set_skill_points(skills_save(), "rifle", 9999).data,
+                         skills_save({"rifle": "9999"}))
+        self.assertEqual(edit.set_skill_points(skills_save(), "rifle", 1).data, skills_save({"rifle": "1"}))
+        for points in (-1, 10000):
+            for skill in ("cooking", "rifle"):
+                with self.subTest(skill=skill, points=points):
+                    self.assertEqual(self.refusal(skill, points),
+                                     f"the points must be a whole number from 0 to 9999, not {points}")
+
+    def test_points_that_are_no_whole_number_are_refused(self) -> None:
+        for points in (12.5, 12.0, "12", True, False, None):
+            with self.subTest(points=points):
+                self.assertEqual(self.refusal("cooking", points),
+                                 f"the points must be a whole number from 0 to 9999, not {points}")
+
+    def test_points_the_save_holds_already_are_refused(self) -> None:
+        self.assertEqual(self.refusal("cooking", 264), "cooking has 264 points already. Nothing to change")
+        # A 0 the save holds, as the old C# editor writes it.
+        self.assertEqual(self.refusal("rifle", 0, skills_save({"rifle": "0"})),
+                         "rifle has 0 points already. Nothing to change")
+
+    def test_points_left_out_that_would_stay_zero_are_refused(self) -> None:
+        self.assertEqual(self.refusal("rifle", 0), "rifle has 0 points already: the game leaves m_Points out "
+                                                   "of the save when it is 0. Nothing to change")
+
+    def test_a_zero_the_save_holds_can_be_changed(self) -> None:
+        result = edit.set_skill_points(skills_save({"rifle": "0"}), "rifle", 5)
+        self.assertEqual((result.old_points, result.new_points), ("0", "5"))
+        self.assertEqual(result.data, skills_save({"rifle": "5"}))
+
+    def test_names_that_are_no_skill_are_refused(self) -> None:
+        self.assertEqual(self.refusal("cookin", 5),
+                         f"there is no skill named cookin. Did you mean cooking? The skills are {SKILL_NAMES}")
+        self.assertEqual(self.refusal("xyz", 5), f"there is no skill named xyz. The skills are {SKILL_NAMES}")
+        # The name of a record in the save is not a name this tool takes.
+        self.assertIn("there is no skill named m_Skill_CookingSerialized. ",
+                      self.refusal("m_Skill_CookingSerialized", 5))
+        self.assertIn("there is no skill named . ", self.refusal("", 5))
+
+    def test_skills_that_cannot_be_read_are_refused(self) -> None:
+        cooking = "m_Skill_CookingSerialized"
+        record = f"the skill cooking is not stored the way this tool expects ({cooking}), so it is not changed"
+        number = "the points of cooking are not stored as a plain whole number, so they are not changed"
+        cases = {
+            "no record": (skills_save(records={cooking: None}), record),
+            "a record that is no nested document": (skills_save(records={cooking: {}}), record),
+            "a nested document that is no record": (skills_save(records={cooking: NestedJson([])}), record),
+            "no record that holds the nine": (skills_save(document={"m_SkillsManagerSerialized": None}),
+                                              record),
+            "the nine outside a nested document": (skills_save(document={"m_SkillsManagerSerialized": {
+                cooking: NestedJson({"m_Points": Number("5")})}}), record),
+            "points with a fraction": (skills_save({"cooking": "3.5"}), number),
+            "points below zero": (skills_save({"cooking": "-3"}), number),
+            "text": (skills_save(records={cooking: NestedJson({"m_Points": "3"})}), number),
+            "true": (skills_save({"cooking": True}), number),
+        }
+        for name, (save, message) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.refusal("cooking", 50, save), message)
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = skills_save()
+        kept = bytes(original)
+        edit.set_skill_points(original, "cooking", 150)
+        edit.set_skill_points(original, "rifle", 40)
+        self.assertEqual(original, kept)
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        self.assertIn("does not pass the exact rebuild check", self.refusal("cooking", 150, b"not a save"))
+
+    def caught(self, meant: bytes, wrong: bytes, skill: str, points: int) -> str:
+        """What the tool says when the encoder hands back wrong in place of the save it meant to write."""
+        with encoding_as(meant, wrong):
+            with self.assertRaises(EditError) as refused:
+                edit.set_skill_points(skills_save(), skill, points)
+        return str(refused.exception)
+
+    def test_points_written_wrongly_are_caught(self) -> None:
+        message = self.caught(skills_save({"cooking": "150"}), skills_save({"cooking": "151"}), "cooking", 150)
+        self.assertIn("did not change exactly the one value asked for", message)
+        self.assertIn("m_Skill_CookingSerialized > m_Points: 264 -> 151", message)
+
+    def test_points_written_to_another_skill_are_caught(self) -> None:
+        message = self.caught(skills_save({"cooking": "150"}), skills_save({"archery": "150"}), "cooking", 150)
+        self.assertIn("did not change exactly the one value asked for", message)
+        self.assertIn("m_Skill_ArcherySerialized > m_Points: 22 -> 150", message)
+
+    def test_a_change_that_was_not_asked_for_is_caught(self) -> None:
+        message = self.caught(skills_save({"cooking": "150"}), skills_save({"cooking": "150", "archery": "23"}),
+                              "cooking", 150)
+        self.assertIn("did not change exactly the one value asked for", message)
+        self.assertIn("m_Skill_ArcherySerialized > m_Points: 22 -> 23", message)
+
+    def test_points_that_were_not_written_are_caught(self) -> None:
+        for skill, meant in (("cooking", skills_save({"cooking": "150"})),
+                             ("rifle", skills_save({"rifle": "150"}))):
+            with self.subTest(skill):
+                message = self.caught(meant, skills_save(), skill, 150)
+                self.assertIn("Found: no difference at all", message)
+
+    def test_points_put_in_with_another_value_are_caught(self) -> None:
+        # The comparison of the two saves sees a record that got a field, and not what the field holds.
+        message = self.caught(skills_save({"rifle": "40"}), skills_save({"rifle": "41"}), "rifle", 40)
+        self.assertEqual(message, "safety check failed: m_Skill_RifleSerialized in the edited save is not the "
+                                  "original one with m_Points 40 put in front: m_Points is 41")
+
+    def test_points_put_in_as_text_are_caught(self) -> None:
+        wrong = skills_save(records={"m_Skill_RifleSerialized": NestedJson({"m_Points": "40"})})
+        message = self.caught(skills_save({"rifle": "40"}), wrong, "rifle", 40)
+        self.assertIn('with m_Points 40 put in front: m_Points is "40"', message)
+
+    def test_points_put_in_next_to_another_change_in_the_record_are_caught(self) -> None:
+        # The comparison of the two saves stops at a record whose fields changed, so this takes its own check.
+        message = self.caught(skills_save({"carcass-harvesting": "7"}),
+                              skills_save({"carcass-harvesting": "7"}, hours="0.5"), "carcass-harvesting", 7)
+        self.assertIn("m_Skill_CarcassHarvestingSerialized in the edited save is not the original one with "
+                      "m_Points 7 put in front: m_NumHoursToConvertToSkillPoints changed as well", message)
+
+    def test_points_put_in_behind_what_the_record_holds_are_caught(self) -> None:
+        wrong = skills_save(records={"m_Skill_CarcassHarvestingSerialized": NestedJson(
+            {"m_NumHoursToConvertToSkillPoints": Number("0.783333361"), "m_Points": Number("7")})})
+        message = self.caught(skills_save({"carcass-harvesting": "7"}), wrong, "carcass-harvesting", 7)
+        self.assertIn("fields m_NumHoursToConvertToSkillPoints, m_Points", message)
+
+    def test_points_put_into_the_record_of_another_skill_are_caught(self) -> None:
+        message = self.caught(skills_save({"rifle": "40"}), skills_save({"revolver": "40"}), "rifle", 40)
+        self.assertIn("did not change exactly the one value asked for", message)
+        self.assertIn("m_Skill_RevolverSerialized: fields  -> fields m_Points", message)
+
+    def test_the_check_of_a_number_put_in_needs_both_records(self) -> None:
+        after: Dict[str, JsonValue] = {"m_Points": Number("40")}
+        edit._prove_put_in({}, after, "m_Skill_RifleSerialized", "m_Points", "40")
+        for name, first, second in (("no original record", None, after), ("no edited record", {}, None)):
+            with self.subTest(name):
+                with self.assertRaises(EditError) as caught:
+                    edit._prove_put_in(first, second, "m_Skill_RifleSerialized", "m_Points", "40")
+                self.assertEqual(str(caught.exception),
+                                 "safety check failed: m_Skill_RifleSerialized in the edited save is not the "
+                                 "original one with m_Points 40 put in front: the record cannot be read")
+
+
 class NewFileTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -2667,7 +2984,7 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("Untested", out)
         self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds",
                                                              "repair-all", "remove-item", "copy-item",
-                                                             "set-player"}))
+                                                             "set-player", "set-skill"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -3282,8 +3599,145 @@ class CommandTests(unittest.TestCase):
                       err.getvalue())
         self.assertFalse(self.out.exists())
 
+    def test_skills_lists_the_nine_skills(self) -> None:
+        self.save.write_bytes(skills_save({"revolver": "0"}))
+        before = self.snapshot()
+        code, out, err = self.run_command("skills", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines(), [
+            "skill               points  in the save",
+            "fire-starting           12  m_Points 12",
+            "carcass-harvesting       0  m_Points is left out, which means 0",
+            "cooking                264  m_Points 264",
+            "ice-fishing              0  m_Points is left out, which means 0",
+            "rifle                    0  m_Points is left out, which means 0",
+            "archery                 22  m_Points 22",
+            "mending                  0  m_Points is left out, which means 0",
+            "revolver                 0  m_Points 0",
+            "gunsmithing              0  m_Points is left out, which means 0",
+            "The 9 skills in sandbox15.",
+            "The save holds points and no level. The game works the level out from the points.",
+        ])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_skills_marks_a_skill_it_cannot_read(self) -> None:
+        self.save.write_bytes(skills_save(records={"m_Skill_CookingSerialized": None}))
+        code, out, err = self.run_command("skills", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[3], "cooking                     cannot be read: m_Skill_Cooking"
+                                              "Serialized is not stored the way this tool expects")
+        self.assertEqual(out.splitlines()[2], "carcass-harvesting       0  m_Points is left out, which means 0")
+
+    def test_skills_on_something_that_is_no_save(self) -> None:
+        self.save.write_bytes(b"not a save")
+        code, out, err = self.run_command("skills", str(self.save))
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Refused:", err)
+        code, out, err = self.run_command("skills", str(self.folder / "sandbox99"))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
+    def test_set_skill_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(skills_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("set-skill", str(self.save), "--skill", "cooking", "--points", "150",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), skills_save({"cooking": "150"}))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], f"Save:     sandbox15, {len(skills_save()):,} bytes, passes the exact "
+                                   "rebuild check")
+        self.assertEqual(lines[1:5], [
+            "Skill:    cooking (m_Skill_CookingSerialized)",
+            "Change:   points 264 -> 150",
+            "Checked:  the edited save differs from the original in exactly this one value",
+            "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
+        ])
+        self.assertEqual(lines[5], "Untested: no save changed by set-skill has been loaded in the game yet. "
+                                   "Try it on a save you can afford to lose")
+        self.assertEqual(lines[6], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[7], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[8:], ["sandbox15 itself was not changed."])
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_set_skill_says_when_it_puts_the_points_in(self) -> None:
+        self.save.write_bytes(skills_save())
+        code, out, err = self.run_command("set-skill", str(self.save), "--skill", "carcass-harvesting",
+                                          "--points", "7", "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), skills_save({"carcass-harvesting": "7"}))
+        self.assertEqual(out.splitlines()[1:6], [
+            "Skill:    carcass-harvesting (m_Skill_CarcassHarvestingSerialized)",
+            "Change:   points 0 -> 7 (the game had left m_Points out of the save, which means 0. It is put in "
+            "as 7)",
+            "Checked:  the edited save differs from the original in exactly this one value",
+            "Checked:  the number that was put in is the first in its record, where the game writes it, and "
+            "nothing else in that record differs",
+            "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
+        ])
+
+    def test_set_skill_takes_zero_points(self) -> None:
+        self.save.write_bytes(skills_save())
+        code, out, err = self.run_command("set-skill", str(self.save), "--skill", "cooking", "--points", "0",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), skills_save({"cooking": "0"}))
+        self.assertIn("Change:   points 264 -> 0\n", out)
+        self.assertNotIn("put in", out)
+
+    def test_set_skill_refusals_write_nothing(self) -> None:
+        self.save.write_bytes(skills_save())
+        existing = self.folder / "taken.edited"
+        existing.write_bytes(b"already here")
+        out = ["--out", str(self.out)]
+        cases = {
+            "too high": (["--skill", "cooking", "--points", "10000"] + out,
+                         "the points must be a whole number from 0 to 9999, not 10000"),
+            "below zero": (["--skill", "cooking", "--points", "-1"] + out,
+                           "the points must be a whole number from 0 to 9999, not -1"),
+            "no change": (["--skill", "cooking", "--points", "264"] + out, "cooking has 264 points already"),
+            "left out and still 0": (["--skill", "rifle", "--points", "0"] + out,
+                                     "rifle has 0 points already: the game leaves m_Points out"),
+            "no such skill": (["--skill", "cookin", "--points", "5"] + out,
+                              "there is no skill named cookin. Did you mean cooking?"),
+            "output exists": (["--skill", "cooking", "--points", "150", "--out", str(existing)],
+                              "already exists"),
+        }
+        before = self.snapshot()
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                code, printed, err = self.run_command("set-skill", str(self.save), *options)
+                self.assertEqual(code, 1)
+                self.assertIn("Refused:", err)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(printed, "")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(existing.read_bytes(), b"already here")
+
+    def test_set_skill_checks_the_output_path_before_any_edit_work(self) -> None:
+        self.save.write_bytes(skills_save())
+        with mock.patch.object(edit, "set_skill_points") as attempted:
+            code, _, _ = self.run_command("set-skill", str(self.save), "--skill", "cooking", "--points", "150",
+                                          "--out", str(self.folder / "sandbox16"))
+        self.assertEqual(code, 1)
+        attempted.assert_not_called()
+
+    def test_set_skill_on_a_missing_save_is_a_usage_error(self) -> None:
+        code, out, err = self.run_command("set-skill", str(self.folder / "sandbox99"), "--skill", "cooking",
+                                          "--points", "150", "--out", str(self.out))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)], ["repair-all", str(self.save)],
+                          ["set-skill", str(self.save), "--skill", "cooking", "--out", str(self.out)],
+                          ["set-skill", str(self.save), "--points", "5", "--out", str(self.out)],
+                          ["set-skill", str(self.save), "--skill", "cooking", "--points", "5"],
+                          ["set-skill", str(self.save), "--skill", "cooking", "--points", "12.5",
+                           "--out", str(self.out)],
                           ["set-player", str(self.save), "--condition", "100"],
                           ["set-player", str(self.save), "--condition", "--out", str(self.out)],
                           ["copy-item", str(self.save), "--out", str(self.out)],
@@ -3658,6 +4112,60 @@ class RealSaveTests(unittest.TestCase):
                         self.assertEqual(new.stored, edit.stored_player_value(old.name, wanted[old.name]))
                     else:
                         self.assertEqual(new, old)
+
+    def test_the_skills_can_be_read_in_every_real_save(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            skills = edit.list_skills(codec.decode_save(path.read_bytes()))
+            self.assertEqual([(skill.name, skill.record) for skill in skills], list(edit.SKILLS.items()))
+            for skill in skills:
+                with self.subTest(save=path.name, skill=skill.name):
+                    self.assertIsNotNone(skill.points)
+                    self.assertTrue(0 <= skill.points <= edit.MAX_SKILL_POINTS, skill.points)
+                    # Points the save holds are in the form this tool writes.
+                    if skill.stored is not None:
+                        self.assertEqual(skill.stored, str(skill.points))
+
+    def test_points_a_real_save_holds_are_the_first_field_of_their_record(self) -> None:
+        # That is where this tool puts points the game left out.
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        held = 0
+        for path in codec.find_saves(folder):
+            save = codec.decode_save(path.read_bytes())
+            for name in edit.SKILLS:
+                record = edit._skill_record(save, name)
+                self.assertIsNotNone(record)
+                if "m_Points" in record:
+                    with self.subTest(save=path.name, skill=name):
+                        self.assertEqual(list(record)[0], "m_Points")
+                    held += 1
+        self.assertTrue(held, "no real save holds the points of a skill")
+
+    def test_the_points_of_a_skill_can_be_changed_in_every_real_save(self) -> None:
+        """In memory only. No file is written. Per save: one skill with points, and one with points left out."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            original = path.read_bytes()
+            before = edit.list_skills(codec.decode_save(original))
+            held = next((skill for skill in before if skill.stored is not None), None)
+            left_out = next((skill for skill in before if skill.stored is None), None)
+            for target in (held, left_out):
+                if target is None:
+                    continue
+                with self.subTest(save=path.name, skill=target.name, stored=target.stored):
+                    points = target.points + 5
+                    result = edit.set_skill_points(original, target.name, points)
+                    self.assertEqual((result.skill, result.old_points, result.new_points),
+                                     (target.name, target.stored, str(points)))
+                    self.assertEqual(result.unchanged_entries, result.entries - 1)
+                    self.assertTrue(codec.verify_save(result.data).identical)
+                    after = edit.list_skills(codec.decode_save(result.data))
+                    self.assertEqual(after, [Skill(skill.name, skill.record, str(points), points)
+                                             if skill is target else skill for skill in before])
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])

@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold |
+| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold. Or the points of one skill |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -582,6 +582,93 @@ Things to know about the player's values:
 - A number that would leave less than 0.0001 in the save, such as `--hydration 99.99999`, is
   refused. The game writes numbers that small in another form. Use 100.
 
+## Change the points of a skill
+
+`tld_save_edit.py` also changes the points of one of the nine skills. The save you name is
+only read, the result goes to a new file, and the three checks above stand in between.
+
+Not tested in the game yet: nobody has loaded a save changed by `set-skill`. Try it on a
+save you can afford to lose.
+
+```powershell
+$save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox6"
+python tld_save_edit.py skills $save
+python tld_save_edit.py set-skill $save --skill cooking --points 150 --out "$env:TEMP\sandbox6.edited"
+```
+
+`skills` lists the nine skills with their points, the way the save holds them:
+
+```text
+skill               points  in the save
+fire-starting           12  m_Points 12
+carcass-harvesting       0  m_Points is left out, which means 0
+cooking                  3  m_Points 3
+ice-fishing              0  m_Points is left out, which means 0
+rifle                    0  m_Points is left out, which means 0
+archery                  0  m_Points is left out, which means 0
+mending                  0  m_Points is left out, which means 0
+revolver                 0  m_Points is left out, which means 0
+gunsmithing              0  m_Points is left out, which means 0
+The 9 skills in sandbox6.
+The save holds points and no level. The game works the level out from the points.
+```
+
+`set-skill` takes one skill by its name in the first column, and the new points as a whole
+number from 0 to 9999:
+
+| `--skill` | In the game | Its record in the save |
+|---|---|---|
+| `fire-starting` | Fire Starting | `m_Skill_FirestartingSerialized` |
+| `carcass-harvesting` | Carcass Harvesting | `m_Skill_CarcassHarvestingSerialized` |
+| `cooking` | Cooking | `m_Skill_CookingSerialized` |
+| `ice-fishing` | Ice Fishing | `m_Skill_IceFishingSerialized` |
+| `rifle` | Rifle Firearm | `m_Skill_RifleSerialized` |
+| `archery` | Archery | `m_Skill_ArcherySerialized` |
+| `mending` | Mending | `m_Skill_ClothingRepairSerialized` |
+| `revolver` | Revolver Firearm | `m_Skill_RevolverSerialized` |
+| `gunsmithing` | Gunsmithing | `m_Skill_GunsmithingSerialized` |
+
+```text
+Save:     sandbox6, 291,658 bytes, passes the exact rebuild check
+Skill:    cooking (m_Skill_CookingSerialized)
+Change:   points 3 -> 150
+Checked:  the edited save differs from the original in exactly this one value
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by set-skill has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox6.edited, 291,736 bytes
+SHA-256:  a96e22d22df1b3afac5f950e43030f33c9ce4934d2c3ac1a74250e31078acc81
+sandbox6 itself was not changed.
+```
+
+Things to know about skills:
+
+- The save holds points and no level. The game works the level out from the points. How
+  many points a level takes is fixed by the game, and the save does not hold it. The game's
+  wiki, on its page about the Skilled Survivor achievement, names totals for level 5: 350
+  for Cooking and for Mending, 250 for Ice Fishing, 200 for Fire Starting and 125 for
+  Archery. This tool has not checked those figures against the game.
+- The game leaves the points out of a save when they are 0, and `skills` then says `is left
+  out, which means 0`. In the 14 real saves that is so for 74 of the 126 skill records.
+  `set-skill` puts the points in as the first field of the record. That is where the game
+  writes them in every real record that holds them (52 of 52, four of which hold a second
+  number behind the points). The `Change` line says so, and the check of a number that was
+  put in runs, as it does for the player's values:
+
+  ```text
+  Change:   points 0 -> 40 (the game had left m_Points out of the save, which means 0. It is put in as 40)
+  Checked:  the number that was put in is the first in its record, where the game writes it, and nothing else in that record differs
+  ```
+
+- `--points 0` on a skill that has points writes a 0. The game would leave the number out.
+  The old C# editor writes a 0 as well, and two of the 14 real saves hold such zeros.
+- Only the points change. The record of Carcass Harvesting can hold a second number,
+  `m_NumHoursToConvertToSkillPoints`, which is below 1 in all five real records that hold
+  it. That number is left alone.
+- The save has another record with "skills" in its name, `m_PlayerSkillsSerialized`, with
+  three numbers of its own. `set-skill` does not read or change it.
+- The limit of 9999 only catches a slip of the hand. The highest number in the 14 real
+  saves is 264.
+
 ## Put an edited save in place, or put a backup back
 
 `tld_save_apply.py` is the only tool here that changes a save file. `apply` puts a file
@@ -771,10 +858,11 @@ python -m unittest -v
 
 With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
 liquid, one amount of calories and the rounds of one weapon in each real save that has
-them, repair every real inventory, take one item out of each, and copy one item in each.
-That happens in memory only: no file is written. The apply tests copy each real save into a temporary folder and
-work on the copy. The reader tests write each real save's CSV to a temporary folder. Your
-save folder is only read. Allow about ten minutes for the whole run.
+them, repair every real inventory, take one item out of each, copy one item in each, change
+the player's five values, and change the points of up to two skills in each. That happens
+in memory only: no file is written. The apply tests copy each real save into a temporary
+folder and work on the copy. The reader tests write each real save's CSV to a temporary
+folder. Your save folder is only read. Allow about ten minutes for the whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.
