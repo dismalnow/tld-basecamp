@@ -63,7 +63,7 @@ import sys
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 import tld_save_codec as codec
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
@@ -624,22 +624,33 @@ def _show(value: JsonValue) -> str:
     return type(value).__name__
 
 
-def differences(before: JsonValue, after: JsonValue, path: str = "") -> Iterator[Difference]:
-    """Every place where two decoded values differ, as (path, before, after)."""
+def differences(before: JsonValue, after: JsonValue, path: str = "",
+                matched: Optional[Tuple[str, Sequence[Tuple[int, int]]]] = None) -> Iterator[Difference]:
+    """Every place where two decoded values differ, as (path, before, after).
+
+    A list is compared position by position, and a list whose length changed is one
+    difference. matched names one list by its path and says which of its positions belong
+    together, as pairs of a position in before and a position in after. Only those pairs
+    are compared in that list, each under its position in before.
+    """
     if isinstance(before, NestedJson) and isinstance(after, NestedJson):
-        yield from differences(before.value, after.value, path)
+        yield from differences(before.value, after.value, path, matched)
     elif isinstance(before, dict) and isinstance(after, dict):
         if list(before) != list(after):
             yield (path, "fields " + ", ".join(before), "fields " + ", ".join(after))
             return
         for key in before:
-            yield from differences(before[key], after[key], f"{path} > {key}" if path else key)
+            yield from differences(before[key], after[key], f"{path} > {key}" if path else key, matched)
     elif isinstance(before, list) and isinstance(after, list):
+        if matched is not None and path == matched[0]:
+            for left, right in matched[1]:
+                yield from differences(before[left], after[right], f"{path}[{left}]")
+            return
         if len(before) != len(after):
             yield (path, f"{len(before)} items", f"{len(after)} items")
             return
         for position, (left, right) in enumerate(zip(before, after)):
-            yield from differences(left, right, f"{path}[{position}]")
+            yield from differences(left, right, f"{path}[{position}]", matched)
     elif type(before) is not type(after) or before != after:
         yield (path, _show(before), _show(after))
 
@@ -1312,6 +1323,70 @@ def copy_item(original: bytes, prefab: str, entry: Optional[int] = None) -> Copy
     _prove_copy(original, edited, chosen, new)
     return CopyEdit(edited, prefab, chosen, before, None if stack is None else stack[1], old, new,
                     entries, unchanged)
+
+
+# ---------------------------------------------------------------------------
+# Comparing two saves whose inventories do not hold the same entries
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SaveComparison:
+    """How a second save differs from a first one."""
+    removed: Tuple[Tuple[int, str], ...]    # inventory entries only the first save holds: (entry there, item)
+    added: Tuple[Tuple[int, str], ...]      # inventory entries only the second save holds: (entry there, item)
+    changes: Tuple[Difference, ...]         # every other value that differs, as differences() reports it
+
+
+def _instance_numbers(items: List[JsonValue]) -> Optional[List[int]]:
+    """The instance number of every inventory entry, in order.
+
+    None when an entry has no whole number, or when two entries have the same one.
+    """
+    numbers: List[int] = []
+    for item in items:
+        gear = _gear_of(item)
+        number = gear.get("m_InstanceIDProxy") if gear is not None else None
+        if not isinstance(number, Number) or not _SIGNED_WHOLE.fullmatch(number.literal):
+            return None
+        numbers.append(int(number.literal))
+    return numbers if len(set(numbers)) == len(numbers) else None
+
+
+def compare_saves(before: DecodedSave, after: DecodedSave) -> SaveComparison:
+    """How the second save differs from the first one, with inventory entries that came or went named.
+
+    differences() compares a list position by position. That is wrong for an inventory with
+    an entry added or removed, because every entry behind it has moved. So the entries of the
+    two inventories are matched by instance number here. An entry that only one save holds is
+    listed as removed or added, and an entry that both hold is compared under its entry number
+    in the first save.
+
+    When the entries cannot be matched (an instance number is missing or occurs twice, or the
+    entries both saves hold are in another order), nothing is listed as removed or added, and
+    changes is what differences() reports for the two saves. For two inventories with the
+    same entries in the same order the result is the same either way.
+    """
+    def position_by_position() -> SaveComparison:
+        return SaveComparison((), (), tuple(differences(before.slot, after.slot)))
+
+    def only_in(items: List[JsonValue], kept: Set[int]) -> Tuple[Tuple[int, str], ...]:
+        return tuple((entry, _prefab_of(item) or "an item without a name")
+                     for entry, item in enumerate(items) if entry not in kept)
+
+    try:
+        old_items, new_items = _inventory_items(before), _inventory_items(after)
+    except EditError:
+        return position_by_position()
+    old_numbers, new_numbers = _instance_numbers(old_items), _instance_numbers(new_items)
+    if old_numbers is None or new_numbers is None:
+        return position_by_position()
+    place = {number: entry for entry, number in enumerate(old_numbers)}
+    pairs = [(place[number], entry) for entry, number in enumerate(new_numbers) if number in place]
+    if any(first[0] > second[0] for first, second in zip(pairs, pairs[1:])):
+        return position_by_position()
+    changes = tuple(differences(before.slot, after.slot, matched=(_items_path(), pairs)))
+    return SaveComparison(only_in(old_items, {left for left, _ in pairs}),
+                          only_in(new_items, {right for _, right in pairs}), changes)
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,9 @@ apply refuses unless all of this holds:
     2. SAVE and EDITED_FILE both pass the exact rebuild check (tld_save_codec.py verify).
     3. EDITED_FILE was made from SAVE as it is now: the same save, not written by the game
        since. Otherwise putting it in place would undo what the game saved later.
-Then it works in this order and stops at the first step that fails:
+It then lists what differs between SAVE and EDITED_FILE: the inventory entries that went or
+came, and every other value. After that it works in this order and stops at the first step
+that fails:
     4. Copy SAVE into the backup folder under a new name, and read the copy back.
     5. Put the edited content in place of SAVE in one step, and read SAVE back.
 
@@ -189,7 +191,12 @@ class Plan:
     old_data: Optional[bytes]        # what the live save holds now. None when it does not exist
     old_saved_at: Optional[str]      # None when the live save does not exist or cannot be read as a save
     backup: Optional[Path]           # where old_data is copied first. None when there is nothing to copy
-    changes: Tuple[Difference, ...]  # apply: every value that differs. Empty for restore
+    # apply: every value that differs, apart from inventory entries that came or went. Empty for restore
+    changes: Tuple[Difference, ...]
+    # apply: the inventory entries the edited file no longer holds, as (entry number in the live save,
+    # item), and the ones only the edited file holds, as (entry number in the edited file, item)
+    removed: Tuple[Tuple[int, str], ...] = ()
+    added: Tuple[Tuple[int, str], ...] = ()
 
 
 def _backup_path(backup_dir: Path, live: Path, now: Optional[datetime]) -> Path:
@@ -223,11 +230,11 @@ def plan_apply(live: Path, edited: Path, backup_dir: Path, now: Optional[datetim
     proposed = _decode_exact(new_data, edited.name)
     _require_copy_of(proposed, edited.name, live)
     _require_same_game_save(current, proposed, live, edited.name)
-    changes = tuple(edit.differences(current.slot, proposed.slot))
-    if not changes:
+    found = edit.compare_saves(current, proposed)
+    if not (found.changes or found.removed or found.added):
         raise ApplyError(f"{edited.name} holds exactly what {live.name} already holds. Nothing to put in place")
     return Plan(live, edited, new_data, _saved_at(proposed), old_data, _saved_at(current),
-                _backup_path(backup_dir, live, now), changes)
+                _backup_path(backup_dir, live, now), found.changes, found.removed, found.added)
 
 
 def plan_restore(live: Path, backup: Path, backup_dir: Path, now: Optional[datetime] = None) -> Plan:
@@ -405,6 +412,18 @@ def list_backups(save_name: str, backup_dir: Path) -> List[Backup]:
 # Command line
 # ---------------------------------------------------------------------------
 
+def _print_entries(label: str, entries: Sequence[Tuple[int, str]], numbered: str) -> None:
+    """The inventory entries that an edited file adds or takes away. Prints nothing when there are none."""
+    count = len(entries)
+    if not count:
+        return
+    print(f"{label:<12}{count} inventory entr{'y' if count == 1 else 'ies'} (entry numbers as in {numbered})")
+    for entry, prefab in entries[:SHOWN_CHANGES]:
+        print(f"              entry {entry}, {prefab}")
+    if count > SHOWN_CHANGES:
+        print(f"              and {count - SHOWN_CHANGES} more")
+
+
 def _print_plan(plan: Plan, command: str) -> None:
     if plan.old_data is None:
         print(f"Save:       {plan.live.name} does not exist now")
@@ -414,8 +433,16 @@ def _print_plan(plan: Plan, command: str) -> None:
         print(f"Save:       {plan.live.name}, {len(plan.old_data):,} bytes, {when}")
     if command == "apply":
         print(f"Edited:     {plan.source}, {len(plan.new_data):,} bytes")
+        _print_entries("Removed:", plan.removed, "the save")
+        _print_entries("Added:", plan.added, "the edited file")
         count = len(plan.changes)
-        print(f"Changes:    {count} value{'' if count == 1 else 's'} differ{'s' if count == 1 else ''}")
+        if not (plan.removed or plan.added):
+            print(f"Changes:    {count} value{'' if count == 1 else 's'} differ{'s' if count == 1 else ''}")
+        elif count:
+            print(f"Changes:    {count} other value{'' if count == 1 else 's'} differ"
+                  f"{'s' if count == 1 else ''} (entry numbers as in the save)")
+        else:
+            print("Changes:    no other value differs")
         for path, old, new in plan.changes[:SHOWN_CHANGES]:
             print(f"              {path}: {old} -> {new}")
         if count > SHOWN_CHANGES:

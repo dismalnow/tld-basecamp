@@ -1033,6 +1033,39 @@ class DifferenceTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(self.diff(before, after), expected)
 
+    def test_matched_positions_of_one_list_are_compared_in_place_of_all_of_them(self) -> None:
+        before = codec.parse_json('{"a":[10,20,30,40],"b":[1,2],"c":"{\\"a\\":[5,6]}"}')
+        after = codec.parse_json('{"a":[10,30,41],"b":[1,3],"c":"{\\"a\\":[5,7]}"}')
+        length, second, nested = ("a", "4 items", "3 items"), ("b[1]", "2", "3"), ("c > a[1]", "6", "7")
+        cases = {
+            "no list is matched": (None, [length, second, nested]),
+            # The length of the list is not looked at, and each pair goes by its position in the first list.
+            "the first list": (("a", [(0, 0), (2, 1), (3, 2)]), [("a[3]", "40", "41"), second, nested]),
+            "pairs that cross": (("b", [(0, 1), (1, 0)]),
+                                 [length, ("b[0]", "1", "3"), ("b[1]", "2", "1"), nested]),
+            "no pairs at all": (("a", []), [second, nested]),
+            # The list of the same name inside the nested document has a path of its own.
+            "a list inside a nested document": (("c > a", [(1, 0)]), [length, second, ("c > a[1]", "6", "5")]),
+            "a path that is not there": (("d", [(0, 0)]), [length, second, nested]),
+        }
+        for name, (matched, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(list(edit.differences(before, after, matched=matched)), expected)
+
+    def test_the_matched_list_may_be_below_another_list(self) -> None:
+        before = codec.parse_json('{"x":[{"a":[1,2]},{"a":[3,4,5]}]}')
+        after = codec.parse_json('{"x":[{"a":[1,2]},{"a":[5,3]}]}')
+        self.assertEqual(list(edit.differences(before, after)), [("x[1] > a", "3 items", "2 items")])
+        self.assertEqual(list(edit.differences(before, after, matched=("x[1] > a", [(0, 1), (2, 0)]))), [])
+        self.assertEqual(list(edit.differences(before, after, matched=("x[1] > a", [(1, 1)]))),
+                         [("x[1] > a[1]", "4", "3")])
+
+    def test_a_list_inside_a_matched_pair_is_compared_position_by_position(self) -> None:
+        before = codec.parse_json('{"a":[{"a":[1,2]},{"a":[3]}]}')
+        after = codec.parse_json('{"a":[{"a":[3,4]},{"a":[1,2,5]}]}')
+        self.assertEqual(list(edit.differences(before, after, matched=("a", [(0, 1), (1, 0)]))),
+                         [("a[0] > a", "2 items", "3 items"), ("a[1] > a", "1 items", "2 items")])
+
 
 class SetCountTests(unittest.TestCase):
     def test_changes_exactly_one_value(self) -> None:
@@ -1827,6 +1860,163 @@ class CopyTests(unittest.TestCase):
             edit._prove_copy(copy_save(), copy_save(0, "-5240388"), 0, "-5240388")
         self.assertIn("the save does not hold the new instance number -5240388 in exactly one place",
                       str(caught.exception))
+
+
+# (item, instance number, condition). None leaves the name or the number out.
+CarriedSpec = Tuple[Optional[str], Optional[str], str]
+
+CARRIED: Tuple[CarriedSpec, ...] = (
+    ("GEAR_WoodMatches", "-1001000", "1.0"),
+    ("GEAR_Hatchet", "-1001002", "0.75"),
+    ("GEAR_Crackers", "1474360", "0.5"),
+    ("GEAR_Stick", "-1001006", "0.25"),
+    ("GEAR_Stone", "-1001008", "1.0"),
+)
+ROPE: CarriedSpec = ("GEAR_Rope", "-1001010", "1.0")
+
+
+def carried_save(carried: Sequence[CarriedSpec] = CARRIED, hours: str = "3.5",
+                 inventory: Optional[JsonValue] = None) -> bytes:
+    """A save whose inventory holds these entries, each with an instance number of its own.
+
+    inventory puts another value where the list of entries belongs.
+    """
+    items: List[JsonValue] = []
+    for prefab, number, condition in carried:
+        made = item(prefab or "GEAR_Nameless", None, condition)
+        if prefab is None:
+            del made["m_PrefabName"]
+        if number is not None:
+            made["m_SerializedGear"].value["m_InstanceIDProxy"] = Number(number)   # type: ignore[union-attr]
+        items.append(made)
+    content: Dict[str, JsonValue] = {"m_SerializedItems": items if inventory is None else inventory,
+                                     "m_QuickSelectInstanceIDs": []}
+    return build_save(global_document={"m_Inventory_Serialized": NestedJson(content),
+                                       "m_HoursPlayed": Number(hours)})
+
+
+def without(carried: Sequence[CarriedSpec], *entries: int) -> List[CarriedSpec]:
+    return [spec for entry, spec in enumerate(carried) if entry not in entries]
+
+
+def with_condition_of(carried: Sequence[CarriedSpec], entry: int, condition: str) -> List[CarriedSpec]:
+    changed = list(carried)
+    changed[entry] = (changed[entry][0], changed[entry][1], condition)
+    return changed
+
+
+def with_number_of(carried: Sequence[CarriedSpec], entry: int, number: Optional[str]) -> List[CarriedSpec]:
+    changed = list(carried)
+    changed[entry] = (changed[entry][0], number, changed[entry][2])
+    return changed
+
+
+HOURS_PATH = "m_Dict > global > m_HoursPlayed"
+
+
+class CompareSavesTests(unittest.TestCase):
+    def compare(self, before: bytes, after: bytes) -> edit.SaveComparison:
+        return edit.compare_saves(codec.decode_save(before), codec.decode_save(after))
+
+    def position_by_position(self, before: bytes, after: bytes) -> Tuple[Tuple[str, str, str], ...]:
+        return tuple(edit.differences(codec.decode_save(before).slot, codec.decode_save(after).slot))
+
+    def test_identical_saves_do_not_differ(self) -> None:
+        self.assertEqual(self.compare(carried_save(), carried_save()), edit.SaveComparison((), (), ()))
+
+    def test_inventories_with_the_same_entries_are_compared_position_by_position(self) -> None:
+        after = carried_save(with_condition_of(CARRIED, 3, "1.0"), hours="4.25")
+        expected = ((condition_path(3), "0.25", "1.0"), (HOURS_PATH, "3.5", "4.25"))
+        self.assertEqual(self.compare(carried_save(), after), edit.SaveComparison((), (), expected))
+        self.assertEqual(self.position_by_position(carried_save(), after), expected)
+
+    def test_an_entry_that_went_is_named_and_the_others_keep_their_numbers(self) -> None:
+        after = carried_save(without(with_condition_of(CARRIED, 3, "1.0"), 1))
+        found = self.compare(carried_save(), after)
+        # The stick is entry 3 in the first save and entry 2 in the second one.
+        self.assertEqual(found, edit.SaveComparison(((1, "GEAR_Hatchet"),), (),
+                                                    ((condition_path(3), "0.25", "1.0"),)))
+        self.assertEqual(self.position_by_position(carried_save(), after),
+                         ((ITEMS_PATH, "5 items", "4 items"),))
+
+    def test_an_entry_that_came_is_named_with_its_number_in_the_second_save(self) -> None:
+        for position in (0, 2, 5):
+            with self.subTest(position=position):
+                more = list(CARRIED)
+                more.insert(position, ROPE)
+                found = self.compare(carried_save(), carried_save(more))
+                self.assertEqual(found, edit.SaveComparison((), ((position, "GEAR_Rope"),), ()))
+
+    def test_one_entry_gone_and_one_new_leave_the_others_in_place(self) -> None:
+        after = carried_save(without(CARRIED, 1) + [ROPE])
+        self.assertEqual(self.compare(carried_save(), after),
+                         edit.SaveComparison(((1, "GEAR_Hatchet"),), ((4, "GEAR_Rope"),), ()))
+        # The two inventories are of one length. Position by position, every entry behind the one that
+        # went is compared with its neighbor: three entries differ in name, number and condition, and
+        # the last one in name and number.
+        self.assertEqual(len(self.position_by_position(carried_save(), after)), 11)
+
+    def test_several_entries_gone_and_new_next_to_changed_values(self) -> None:
+        tinder: CarriedSpec = ("GEAR_Tinder", "-1001012", "1.0")
+        after = carried_save([tinder] + without(with_condition_of(CARRIED, 2, "1.0"), 0, 3) + [ROPE],
+                             hours="4.25")
+        found = self.compare(carried_save(), after)
+        self.assertEqual(found.removed, ((0, "GEAR_WoodMatches"), (3, "GEAR_Stick")))
+        self.assertEqual(found.added, ((0, "GEAR_Tinder"), (4, "GEAR_Rope")))
+        # In save order: the inventory comes before the hours played.
+        self.assertEqual(found.changes, ((condition_path(2), "0.5", "1.0"), (HOURS_PATH, "3.5", "4.25")))
+
+    def test_an_entry_without_a_name_is_listed_all_the_same(self) -> None:
+        nameless: CarriedSpec = (None, "-1001012", "1.0")
+        longer = carried_save(list(CARRIED) + [nameless])
+        self.assertEqual(self.compare(longer, carried_save()),
+                         edit.SaveComparison(((5, "an item without a name"),), (), ()))
+        self.assertEqual(self.compare(carried_save(), longer),
+                         edit.SaveComparison((), ((5, "an item without a name"),), ()))
+
+    def test_a_chain_of_edits_made_by_this_tool_is_reported_as_what_was_asked_for(self) -> None:
+        original = carried_save()
+        step = edit.set_item_condition(original, "GEAR_Stick", 100).data
+        step = edit.copy_item(step, "GEAR_Crackers").data
+        step = edit.remove_item(step, "GEAR_Hatchet").data
+        self.assertEqual(self.compare(original, step),
+                         edit.SaveComparison(((1, "GEAR_Hatchet"),), ((4, "GEAR_Crackers"),),
+                                             ((condition_path(3), "0.25", "1.0"),)))
+
+    def test_entries_that_cannot_be_matched_are_compared_position_by_position(self) -> None:
+        shorter = without(CARRIED, 1)
+        twin: CarriedSpec = ("GEAR_Rope", "-1001008", "1.0")
+        cases = {
+            "an entry of the first save has no instance number": (with_number_of(CARRIED, 4, None), shorter),
+            "an entry of the second save has no instance number": (CARRIED, with_number_of(shorter, 3, None)),
+            "an instance number is no whole number": (with_number_of(CARRIED, 4, "12.5"), shorter),
+            # The rope has the number of the stone before it. Matched by number, the stone would be taken
+            # for an entry that went or came, and the rope for the stone.
+            "two entries of the first save have the same number": (list(CARRIED) + [twin], CARRIED),
+            "two entries of the second save have the same number": (CARRIED, list(CARRIED) + [twin]),
+            "the entries both saves hold are in another order": (CARRIED,
+                                                                 [shorter[1], shorter[0]] + shorter[2:]),
+            "the same entries in another order": (CARRIED, list(reversed(CARRIED))),
+        }
+        for name, (first, second) in cases.items():
+            with self.subTest(name):
+                before, after = carried_save(first), carried_save(second)
+                expected = self.position_by_position(before, after)
+                self.assertTrue(expected)
+                self.assertEqual(self.compare(before, after), edit.SaveComparison((), (), expected))
+
+    def test_a_save_without_a_list_of_entries_is_compared_position_by_position(self) -> None:
+        odd = carried_save(inventory="none")
+        for before, after in ((carried_save(), odd), (odd, carried_save())):
+            expected = self.position_by_position(before, after)
+            self.assertEqual([path for path, _, _ in expected], [ITEMS_PATH])
+            self.assertEqual(self.compare(before, after), edit.SaveComparison((), (), expected))
+
+    def test_the_two_saves_are_left_as_they_are(self) -> None:
+        before, after = codec.decode_save(carried_save()), codec.decode_save(carried_save(without(CARRIED, 1)))
+        edit.compare_saves(before, after)
+        self.assertEqual(codec.encode_save(before), carried_save())
+        self.assertEqual(codec.encode_save(after), carried_save(without(CARRIED, 1)))
 
 
 class NewFileTests(unittest.TestCase):
