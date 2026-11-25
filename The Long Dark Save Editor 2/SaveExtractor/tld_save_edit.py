@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tld_save_edit.py: change one value in a The Long Dark save and write the result to a new file.
+tld_save_edit.py: change a value in a The Long Dark save and write the result to a new file.
 
 Usage:
     python tld_save_edit.py items SAVE
@@ -13,6 +13,7 @@ Usage:
     python tld_save_edit.py set-liters SAVE --item GEAR_NAME --liters LITERS --out NEW_FILE [--entry N]
     python tld_save_edit.py set-calories SAVE --item GEAR_NAME --calories CALORIES --out NEW_FILE [--entry N]
     python tld_save_edit.py set-rounds SAVE --item GEAR_NAME --rounds N --out NEW_FILE [--entry N]
+    python tld_save_edit.py repair-all SAVE --out NEW_FILE
 
 items lists everything in the player's inventory: entry number, item, count, condition.
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
@@ -21,10 +22,12 @@ the count of one stack. set-condition changes the condition of one item, or of o
 stack. set-liters changes the liquid one item holds: the water you carry, a bottle or
 can, or the fuel in a lamp. set-calories changes the calories left in one food item.
 set-rounds changes the rounds loaded in one rifle, revolver or distress pistol. Add
---entry when the inventory holds more than one of that item.
+--entry when the inventory holds more than one of that item. repair-all sets the
+condition of every item in the inventory to 100%, except ruined items and torches and
+flares that have burned.
 
-set-liters, set-calories and set-rounds have not been tested in the game yet. Their own
-output says so.
+set-liters, set-calories, set-rounds and repair-all have not been tested in the game yet.
+Their own output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -32,8 +35,9 @@ original is a separate step that you do yourself, after a backup.
 
 Three checks stand between an edit and a written file:
     1. The original must pass the exact rebuild check (tld_save_codec.py verify).
-    2. The edited save, decoded again, must differ from the original in exactly the one
-       value that was asked for, and every other entry must be byte for byte unchanged.
+    2. The edited save, decoded again, must differ from the original in exactly what was
+       asked for: one value, or for repair-all one condition for each repaired item.
+       Every other entry must be byte for byte unchanged.
     3. The file on disk is read back and compared with what was meant to be written.
 If a check fails, nothing is left on disk.
 
@@ -78,13 +82,17 @@ ROUNDS_HELD: Dict[str, int] = {
 }
 
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
-NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds"})
+NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all"})
 
 Difference = Tuple[str, str, str]
 
 
 class EditError(ValueError):
     """The edit was refused. The message says why. Nothing was written."""
+
+
+class _RuinedItem(EditError):
+    """The item is ruined. An edit of many items needs to tell that apart from the other refusals."""
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +579,8 @@ def condition_literal(percent: float) -> str:
 def _editable_condition(item: JsonValue, entry: int, prefab: str) -> Tuple[Dict[str, JsonValue], str]:
     """The gear record of an inventory entry and its stored condition.
 
-    Raises EditError when the condition is missing, in an unknown form, or marks a ruined item.
+    Raises EditError when the condition is missing or in an unknown form, and _RuinedItem, which
+    is an EditError too, for a ruined item.
     """
     gear = _gear_of(item)
     value = gear.get("m_NormalizedCondition") if gear is not None else None
@@ -580,8 +589,8 @@ def _editable_condition(item: JsonValue, entry: int, prefab: str) -> Tuple[Dict[
         raise EditError(f"the condition of inventory entry {entry} ({prefab}) is not stored the way this "
                         "tool expects, so it is not changed")
     if float(value.literal) == 0 or gear.get("m_WornOut") is True:
-        raise EditError(f"inventory entry {entry} ({prefab}) is ruined. The game keeps more than the condition "
-                        "for a ruined item, so this tool does not change it")
+        raise _RuinedItem(f"inventory entry {entry} ({prefab}) is ruined. The game keeps more than the "
+                          "condition for a ruined item, so this tool does not change it")
     return gear, value.literal
 
 
@@ -654,8 +663,26 @@ def _clip_path(entry: int) -> str:
     return _gear_path(entry, f"{_WEAPON_RECORD} > {_CLIP}")
 
 
-def _prove_single_change(original: bytes, edited: bytes, expected: Difference) -> Tuple[int, int]:
-    """Decode both saves afresh and confirm that they differ in exactly the expected value.
+def _wrong_changes(found: Sequence[Difference], expected: Sequence[Difference]) -> str:
+    """What to say when two saves do not differ in exactly the expected values."""
+    def shown(some: Sequence[Difference]) -> str:
+        return "; ".join(f"{path}: {old} -> {new}" for path, old, new in some[:5])
+
+    if len(expected) == 1:
+        return ("safety check failed: the edit did not change exactly the one value asked for. "
+                f"Found: {shown(found) or 'no difference at all'}")
+    extra = [difference for difference in found if difference not in expected]
+    missing = [difference for difference in expected if difference not in found]
+    parts = [f"{len(extra)} not asked for ({shown(extra)})"] if extra else []
+    if missing:
+        parts.append(f"{len(missing)} asked for and not made ({shown(missing)})")
+    return (f"safety check failed: the edit did not change exactly the {len(expected)} values asked for. "
+            f"Found {_count_text(len(found), 'difference')}: "
+            + (", ".join(parts) or "the same values in another order"))
+
+
+def _prove_changes(original: bytes, edited: bytes, expected: Sequence[Difference]) -> Tuple[int, int]:
+    """Decode both saves afresh and confirm that they differ in exactly the expected values, in save order.
 
     Returns (entries in the save, entries that are byte for byte unchanged).
     """
@@ -663,16 +690,22 @@ def _prove_single_change(original: bytes, edited: bytes, expected: Difference) -
     if not recheck.identical:
         raise EditError(f"safety check failed: the edited save does not rebuild exactly ({recheck.detail})")
     found = list(differences(codec.decode_save(original).slot, codec.decode_save(edited).slot))
-    if found != [expected]:
-        shown = "; ".join(f"{path}: {old} -> {new}" for path, old, new in found[:5]) or "no difference at all"
-        raise EditError("safety check failed: the edit did not change exactly the one value asked for. "
-                        f"Found: {shown}")
+    if found != list(expected):
+        raise EditError(_wrong_changes(found, expected))
     table_before = json.loads(codec.lzf_decompress(original))[codec.ENTRY_TABLE]
     table_after = json.loads(codec.lzf_decompress(edited))[codec.ENTRY_TABLE]
     changed = [name for name, encoded in table_before.items() if table_after.get(name) != encoded]
     if list(table_before) != list(table_after) or changed != ["global"]:
         raise EditError("safety check failed: entries other than global changed: " + ", ".join(changed))
     return len(table_before), len(table_before) - len(changed)
+
+
+def _prove_single_change(original: bytes, edited: bytes, expected: Difference) -> Tuple[int, int]:
+    """Decode both saves afresh and confirm that they differ in exactly the expected value.
+
+    Returns (entries in the save, entries that are byte for byte unchanged).
+    """
+    return _prove_changes(original, edited, [expected])
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +937,89 @@ def set_weapon_rounds(original: bytes, prefab: str, rounds: int, entry: Optional
     return RoundsEdit(edited, prefab, chosen, old, rounds, holds, entries, unchanged)
 
 
+_FULL_CONDITION = "1.0"
+
+# A torch and a flare keep their burn state and burn time in a record of their own.
+_LIGHT_RECORDS = ("m_TorchItemSerialized", "m_FlareItemSerialized")
+
+
+def _has_burned(gear: Dict[str, JsonValue]) -> bool:
+    """Whether the item is a torch or a flare whose record holds more than a fresh one's.
+
+    A fresh one has no state, or the state Fresh, and no burn time. Anything else counts as
+    burned, and so does a record that cannot be read.
+    """
+    for field in _LIGHT_RECORDS:
+        record = gear.get(field)
+        if record is None:
+            continue
+        content = record.value if isinstance(record, NestedJson) else None
+        if not isinstance(content, dict):
+            return True
+        state = content.get("m_StateProxy")
+        minutes = content.get("m_ElapsedBurnMinutesProxy")
+        if state not in (None, "Fresh") or (minutes is not None and _finite(minutes) != 0):
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class RepairEdit:
+    data: bytes               # the edited save
+    repaired: Tuple[Tuple[int, str, str], ...]    # (entry, item, the condition it had as stored), in save order
+    full: int                 # items that were at 100% already
+    ruined: int               # ruined items. They are left alone
+    burned: int               # torches and flares that have burned. They are left alone
+    unreadable: int           # items whose condition this tool does not change. They are left alone
+    entries: int              # entries in the save
+    unchanged_entries: int    # entries that are byte for byte the original
+
+
+def repair_inventory(original: bytes) -> RepairEdit:
+    """Return the save with every inventory item below 100% set to 100%. Reads and writes no file.
+
+    The rule for each item is the rule of set_item_condition. A ruined item, an item without
+    a name, and an item whose condition is stored in a form this tool does not change are
+    left alone and counted. So is a torch or a flare that has burned: the save keeps its
+    burn time next to its condition. Raises EditError when the save fails the exact rebuild
+    check, when there is nothing to repair, and when the result differs from the original
+    in anything but the conditions of the repaired items.
+    """
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    repaired: List[Tuple[int, str, str]] = []
+    full = ruined = burned = unreadable = 0
+    for entry, item in enumerate(_inventory_items(save)):
+        prefab = _prefab_of(item)
+        try:
+            gear, old = _editable_condition(item, entry, prefab or "an item without a name")
+        except _RuinedItem:
+            ruined += 1
+            continue
+        except EditError:
+            unreadable += 1
+            continue
+        if prefab is None:
+            unreadable += 1
+        elif _as_float32(float(old)) == 1:
+            full += 1
+        elif _has_burned(gear):
+            burned += 1
+        else:
+            gear["m_NormalizedCondition"] = Number(_FULL_CONDITION)
+            repaired.append((entry, prefab, old))
+    if not repaired:
+        raise EditError(f"there is nothing to repair in the inventory: {full} at 100%, {ruined} ruined, "
+                        f"{burned} burned torches or flares, {unreadable} with a condition this tool does "
+                        "not change. Nothing to change")
+    edited = codec.encode_save(save)
+    expected = [(_condition_path(entry), old, _FULL_CONDITION) for entry, _, old in repaired]
+    entries, unchanged = _prove_changes(original, edited, expected)
+    return RepairEdit(edited, tuple(repaired), full, ruined, burned, unreadable, entries, unchanged)
+
+
 # ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
@@ -1104,6 +1220,37 @@ def _run_edit(path: Path, out: Path, command: str, prefab: str, value: Union[flo
     return 0
 
 
+def _run_repair(path: Path, out: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        check_new_file_path(out)
+        edit = repair_inventory(data)
+        write_new_file(out, edit.data)
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 1
+    count = len(edit.repaired)
+    total = count + edit.full + edit.ruined + edit.burned + edit.unreadable
+    values = "this one value" if count == 1 else f"these {count} values"
+    print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
+    print(f"Change:   condition set to 100% for {count} of the {_count_text(total, 'item')} in the inventory")
+    print(f"Left:     {edit.full} at 100% already, {edit.ruined} ruined, {edit.burned} burned torches or "
+          f"flares, {edit.unreadable} with a condition this tool does not change")
+    print(f"Checked:  the edited save differs from the original in exactly {values}")
+    print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
+          "(all except global)")
+    if "repair-all" in NOT_TESTED_IN_GAME:
+        print("Untested: no save changed by repair-all has been loaded in the game yet. Try it on a save "
+              "you can afford to lose")
+    print(f"Written:  {out}, {len(edit.data):,} bytes")
+    print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
+    print(f"{path.name} itself was not changed.")
+    return 0
+
+
 def _liters_argument(text: str) -> Decimal:
     try:
         return Decimal(text)
@@ -1123,6 +1270,7 @@ Examples:
   python tld_save_edit.py set-liters sandbox15 --item GEAR_LampFuel --liters 0.5 --out sandbox15.edited
   python tld_save_edit.py set-calories sandbox15 --item GEAR_MRE --calories 1750 --out sandbox15.edited
   python tld_save_edit.py set-rounds sandbox15 --item GEAR_Revolver --rounds 6 --out sandbox15.edited
+  python tld_save_edit.py repair-all sandbox15 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -1201,6 +1349,12 @@ option was wrong.
                                  "more than one of the weapon")
     set_rounds.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                             help="the file to create. It must not exist yet")
+    repair_all = commands.add_parser("repair-all", help="set every inventory item below 100%% to 100%% "
+                                                        "(not tested in the game yet)")
+    repair_all.add_argument("save", type=Path, metavar="SAVE",
+                            help="the save file to read. It is not changed")
+    repair_all.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                            help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command in ("items", "stacks"):
         return _run_list(args.save, stacks_only=args.command == "stacks")
@@ -1210,6 +1364,8 @@ option was wrong.
         return _run_foods(args.save)
     if args.command == "weapons":
         return _run_weapons(args.save)
+    if args.command == "repair-all":
+        return _run_repair(args.save, args.out)
     value: Union[float, Decimal]
     if args.command == "set-count":
         value = args.count
