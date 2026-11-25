@@ -15,6 +15,7 @@ Usage:
     python tld_save_edit.py set-rounds SAVE --item GEAR_NAME --rounds N --out NEW_FILE [--entry N]
     python tld_save_edit.py repair-all SAVE --out NEW_FILE
     python tld_save_edit.py remove-item SAVE --item GEAR_NAME --out NEW_FILE [--entry N]
+    python tld_save_edit.py copy-item SAVE --item GEAR_NAME --out NEW_FILE [--entry N]
 
 items lists everything in the player's inventory: entry number, item, count, condition.
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
@@ -26,10 +27,10 @@ set-rounds changes the rounds loaded in one rifle, revolver or distress pistol. 
 --entry when the inventory holds more than one of that item. repair-all sets the
 condition of every item in the inventory to 100%, except ruined items and torches and
 flares that have burned. remove-item takes one item, or one whole stack, out of the
-inventory.
+inventory. copy-item adds another one of an item the inventory holds.
 
-set-liters, set-calories, set-rounds, repair-all and remove-item have not been tested in
-the game yet. Their own output says so.
+set-liters, set-calories, set-rounds, repair-all, remove-item and copy-item have not been
+tested in the game yet. Their own output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -38,9 +39,9 @@ original is a separate step that you do yourself, after a backup.
 Three checks stand between an edit and a written file:
     1. The original must pass the exact rebuild check (tld_save_codec.py verify).
     2. The edited save, decoded again, must differ from the original in exactly what was
-       asked for: one value, for repair-all one condition for each repaired item, and for
-       remove-item one inventory entry less. Every other entry must be byte for byte
-       unchanged.
+       asked for: one value, for repair-all one condition for each repaired item, for
+       remove-item one inventory entry less, and for copy-item one more. Every other
+       entry must be byte for byte unchanged.
     3. The file on disk is read back and compared with what was meant to be written.
 If a check fails, nothing is left on disk.
 
@@ -51,6 +52,7 @@ option was wrong.
 from __future__ import annotations
 
 import argparse
+import copy
 import difflib
 import hashlib
 import json
@@ -85,7 +87,8 @@ ROUNDS_HELD: Dict[str, int] = {
 }
 
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
-NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item"})
+NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item",
+                                "copy-item"})
 
 Difference = Tuple[str, str, str]
 
@@ -1143,6 +1146,174 @@ def remove_item(original: bytes, prefab: str, entry: Optional[int] = None) -> Re
                       entries, unchanged)
 
 
+_GUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+@dataclass(frozen=True)
+class CopyEdit:
+    data: bytes               # the edited save
+    prefab: str
+    source: int               # the entry that was copied
+    entry: int                # the entry number of the copy: the last one in the inventory
+    count: Optional[int]      # units in the stack, or None when the item is not a stack
+    old_number: str           # the instance number of the source, as stored
+    new_number: str           # the instance number of the copy
+    entries: int              # entries in the save
+    unchanged_entries: int    # entries that are byte for byte the original
+
+
+def _second_identity(value: JsonValue, path: str = "") -> Optional[str]:
+    """Where an item record holds something, besides its own instance number, that names one item only.
+
+    That is the instance number of an item inside it, a GUID, or a mission object. None when
+    it holds nothing of the kind.
+    """
+    if isinstance(value, NestedJson):
+        return _second_identity(value.value, path)
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            here = f"{path} > {key}" if path else key
+            inner_item = key == "m_InstanceIDProxy" and path != ""
+            if inner_item or (key == "m_MissionObjectSerialized" and inner is not None):
+                return here
+            found = _second_identity(inner, here)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for position, inner in enumerate(value):
+            found = _second_identity(inner, f"{path}[{position}]")
+            if found is not None:
+                return found
+    elif isinstance(value, str) and _GUID.fullmatch(value):
+        return path
+    return None
+
+
+def _why_no_copy(item: JsonValue) -> Optional[str]:
+    """The reason this tool does not copy an inventory entry, or None when it may be copied.
+
+    A copy is a second item that is the same in all but its instance number. So an item is
+    not copied when the game expects just one of it, when the copy would be worn as well, and
+    when its record names this one item in another way too.
+    """
+    gear = _gear_of(item)
+    identity = gear.get("m_InstanceIDProxy") if gear is not None else None
+    if gear is None or not isinstance(identity, Number) or not _SIGNED_WHOLE.fullmatch(identity.literal):
+        return "its instance number is not stored the way this tool expects"
+    if gear.get(_WATER_RECORD) is not None:
+        return "the game keeps the water you carry in this entry. Use set-liters to add water"
+    clothing = gear.get("m_ClothingItemSerialized")
+    worn = clothing.value.get("m_WearingProxy") if isinstance(clothing, NestedJson) \
+        and isinstance(clothing.value, dict) else None
+    if worn is True:
+        return ("you are wearing it in this save, and the copy would be worn as well. Take it off in the "
+                "game first")
+    if worn is not None and worn is not False:
+        return "whether you are wearing it is not stored the way this tool expects"
+    second = _second_identity(gear)
+    if second is not None:
+        return ("its record names this one item in another way too, so a copy would not be a second item: "
+                f"{second}")
+    return None
+
+
+def _whole_numbers(value: JsonValue) -> Iterator[int]:
+    """Every whole number a decoded value holds, as a number or as text."""
+    if isinstance(value, NestedJson):
+        yield from _whole_numbers(value.value)
+    elif isinstance(value, dict):
+        for inner in value.values():
+            yield from _whole_numbers(inner)
+    elif isinstance(value, list):
+        for inner in value:
+            yield from _whole_numbers(inner)
+    elif isinstance(value, (Number, str)):
+        literal = value.literal if isinstance(value, Number) else value
+        if _SIGNED_WHOLE.fullmatch(literal):
+            yield int(literal)
+
+
+def _unused_number(save: DecodedSave) -> int:
+    """An instance number for a new inventory item.
+
+    It is even and negative, as every number the game hands out while it runs is in the real
+    saves. It is below every instance number in the inventory, and the save holds it nowhere.
+    """
+    carried = [0]
+    for gear in map(_gear_of, _inventory_items(save)):
+        number = gear.get("m_InstanceIDProxy") if gear is not None else None
+        if isinstance(number, Number) and _SIGNED_WHOLE.fullmatch(number.literal):
+            carried.append(int(number.literal))
+    lowest = min(carried)
+    taken = set(_whole_numbers(save.slot))
+    candidate = lowest - 2 - lowest % 2
+    while candidate in taken:
+        candidate -= 2
+    return candidate
+
+
+def _prove_copy(original: bytes, edited: bytes, source: int, new_number: str) -> None:
+    """Decode both saves afresh and confirm that the edited inventory is the original one plus one copy.
+
+    The comparison of two saves reports a list that changed its length as one difference and
+    does not look inside it. So this checks that every original item is still in its place,
+    that the new last item differs from its source in the instance number only, and that the
+    save holds the new number in that one place.
+    """
+    before = _inventory_items(codec.decode_save(original))
+    decoded = codec.decode_save(edited)
+    after = _inventory_items(decoded)
+    problem = None
+    if len(after) != len(before) + 1:
+        problem = f"{len(after)} items where {len(before) + 1} were expected"
+    else:
+        moved = [position for position, (left, right) in enumerate(zip(before, after))
+                 if next(differences(left, right), None) is not None]
+        old = _gear_of(before[source])["m_InstanceIDProxy"].literal     # type: ignore[index,union-attr]
+        if moved:
+            problem = f"the item at entry {moved[0]} is not the original one"
+        elif list(differences(before[source], after[-1])) != [("m_SerializedGear > m_InstanceIDProxy", old,
+                                                              new_number)]:
+            problem = f"the new item is not entry {source} with a new instance number and nothing else changed"
+        elif list(_mentions(decoded.slot, int(new_number))) != [_gear_path(len(before), "m_InstanceIDProxy")]:
+            problem = f"the save does not hold the new instance number {new_number} in exactly one place"
+    if problem is not None:
+        raise EditError("safety check failed: the inventory in the edited save is not the original one plus a "
+                        f"copy of entry {source}: {problem}")
+
+
+def copy_item(original: bytes, prefab: str, entry: Optional[int] = None) -> CopyEdit:
+    """Return the save with one more inventory entry: a copy of an entry the inventory holds.
+
+    Reads and writes no file. The copy goes to the end of the inventory and gets an instance
+    number of its own. Raises EditError under the same rules as set_stack_count, and when the
+    entry is one this tool does not copy: the water you carry, an item you are wearing, and an
+    item whose record names it in another way besides its instance number.
+    """
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    items = _inventory_items(save)
+    chosen, item = _select_item(items, prefab, entry)
+    reason = _why_no_copy(item)
+    if reason is not None:
+        raise EditError(f"inventory entry {chosen} ({prefab}) is not copied: {reason}")
+    stack = _stack_of(item)
+    old = _gear_of(item)["m_InstanceIDProxy"].literal                   # type: ignore[index,union-attr]
+    new = str(_unused_number(save))
+    made = copy.deepcopy(item)
+    _gear_of(made)["m_InstanceIDProxy"] = Number(new)                   # type: ignore[index]
+    before = len(items)
+    items.append(made)
+    edited = codec.encode_save(save)
+    expected = (_items_path(), f"{before} items", f"{before + 1} items")
+    entries, unchanged = _prove_single_change(original, edited, expected)
+    _prove_copy(original, edited, chosen, new)
+    return CopyEdit(edited, prefab, chosen, before, None if stack is None else stack[1], old, new,
+                    entries, unchanged)
+
+
 # ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
@@ -1406,6 +1577,35 @@ def _run_remove(path: Path, out: Path, prefab: str, entry: Optional[int]) -> int
     return 0
 
 
+def _run_copy(path: Path, out: Path, prefab: str, entry: Optional[int]) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        check_new_file_path(out)
+        edit = copy_item(data, prefab, entry)
+        write_new_file(out, edit.data)
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 1
+    stack = "" if edit.count is None else f" (a stack of {edit.count})"
+    print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
+    print(f"Item:     {edit.prefab}, inventory entry {edit.source}")
+    print(f"Change:   copied{stack} to a new entry at the end of the inventory, entry {edit.entry}")
+    print(f"Number:   the copy has the instance number {edit.new_number}. The original keeps {edit.old_number}")
+    print("Checked:  the edited inventory is the original one plus this copy, and nothing else differs")
+    print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
+          "(all except global)")
+    if "copy-item" in NOT_TESTED_IN_GAME:
+        print("Untested: no save changed by copy-item has been loaded in the game yet. Try it on a save "
+              "you can afford to lose")
+    print(f"Written:  {out}, {len(edit.data):,} bytes")
+    print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
+    print(f"{path.name} itself was not changed.")
+    return 0
+
+
 def _liters_argument(text: str) -> Decimal:
     try:
         return Decimal(text)
@@ -1427,6 +1627,7 @@ Examples:
   python tld_save_edit.py set-rounds sandbox15 --item GEAR_Revolver --rounds 6 --out sandbox15.edited
   python tld_save_edit.py repair-all sandbox15 --out sandbox15.edited
   python tld_save_edit.py remove-item sandbox15 --item GEAR_Stone --out sandbox15.edited
+  python tld_save_edit.py copy-item sandbox15 --item GEAR_MRE --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -1521,6 +1722,16 @@ option was wrong.
                              "of the item")
     remove.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                         help="the file to create. It must not exist yet")
+    duplicate = commands.add_parser("copy-item", help="add another one of an item the inventory holds "
+                                                      "(not tested in the game yet)")
+    duplicate.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
+    duplicate.add_argument("--item", required=True, metavar="GEAR_NAME",
+                           help="the item to copy, as items prints it, for example GEAR_MRE")
+    duplicate.add_argument("--entry", type=int, metavar="N",
+                           help="the entry number from items. Needed when the inventory holds more than "
+                                "one of the item")
+    duplicate.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                           help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command in ("items", "stacks"):
         return _run_list(args.save, stacks_only=args.command == "stacks")
@@ -1534,6 +1745,8 @@ option was wrong.
         return _run_repair(args.save, args.out)
     if args.command == "remove-item":
         return _run_remove(args.save, args.out, args.item, args.entry)
+    if args.command == "copy-item":
+        return _run_copy(args.save, args.out, args.item, args.entry)
     value: Union[float, Decimal]
     if args.command == "set-count":
         value = args.count

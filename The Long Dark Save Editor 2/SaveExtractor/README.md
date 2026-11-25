@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory |
+| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -122,6 +122,7 @@ except `repair-all`, which works on all of them.
 | `set-rounds` | The rounds loaded in a rifle, a revolver or a distress pistol | Not yet. Its own output says so |
 | `repair-all` | The condition of every item below 100% | Not yet. Its own output says so |
 | `remove-item` | One item, or one whole stack, leaves the inventory | Not yet. Its own output says so |
+| `copy-item` | Another one of an item the inventory holds is added | Not yet. Its own output says so |
 
 ### Count
 
@@ -406,14 +407,61 @@ Things to know about `remove-item`:
   left against the original list.
 - The C# editor removes an item from the list without any of these checks.
 
+### Copy an item
+
+Not tested in the game yet: nobody has loaded a save changed by `copy-item`. Try it on a
+save you can afford to lose.
+
+```powershell
+python tld_save_edit.py items $save
+python tld_save_edit.py copy-item $save --item GEAR_Crackers --entry 11 --out "$env:TEMP\sandbox15.edited"
+```
+
+`copy-item` adds another one of an item the inventory already holds. The copy goes to the
+end of the inventory, so no entry number changes. It is the same as the original in
+everything but its instance number: a stack is copied with its count, food with its
+calories, a weapon with its rounds. When the inventory holds more than one of an item, add
+`--entry` with the number from `items`.
+
+```text
+Save:     sandbox15, 585,798 bytes, passes the exact rebuild check
+Item:     GEAR_Crackers, inventory entry 11
+Change:   copied to a new entry at the end of the inventory, entry 443
+Number:   the copy has the instance number -423202. The original keeps -281632
+Checked:  the edited inventory is the original one plus this copy, and nothing else differs
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by copy-item has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 586,017 bytes
+SHA-256:  73c5ad0309327896dd3a002004e0ed7e3020338a91b27a6616d92c6f9fb09133
+sandbox15 itself was not changed.
+```
+
+Things to know about `copy-item`:
+
+- It cannot add an item the inventory does not hold. That takes a record built from nothing
+  for each kind of item, and it is not built yet: see `ROADMAP.md`.
+- The copy gets an instance number of its own. The number is even and negative, as every
+  number the game hands out while it runs is in the real saves (4,647 of them). It is below
+  every number in the inventory, and the save holds it nowhere else.
+- The tool does not copy some items, and says why:
+  - The two entries that hold the water you carry. Use `set-liters` to add water.
+  - Clothing you are wearing, because the copy would be worn as well.
+  - An item whose record names that one item in another way too: a mission object, an item
+    with a GUID of its own (34 of the 1,143 inventory items in the real saves), or an item
+    with another item inside it, such as a respirator with its canister.
+- Three things are checked after the copy is made: every original item is still in its
+  place, the new item differs from its source in the instance number only, and the save
+  holds the new number in that one place.
+
 ### The checks
 
 Three checks stand between an edit and a written file. If one fails, nothing is left on disk.
 
 1. The original must pass `tld_save_codec.py verify`.
 2. The edited save, decoded again, must differ from the original in exactly what was asked
-   for: one value, for `repair-all` one condition for each repaired item, and for
-   `remove-item` one inventory entry less. Every other entry must be byte for byte unchanged.
+   for: one value, for `repair-all` one condition for each repaired item, for `remove-item`
+   one inventory entry less, and for `copy-item` one more. Every other entry must be byte
+   for byte unchanged.
 3. The new file is read back and compared with what was meant to be written.
 
 The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
@@ -586,8 +634,8 @@ python -m unittest -v
 
 With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
 liquid, one amount of calories and the rounds of one weapon in each real save that has
-them, repair every real inventory, and take one item out of each. That happens in memory
-only: no file is written. The apply tests copy each real save into a temporary folder and
+them, repair every real inventory, take one item out of each, and copy one item in each.
+That happens in memory only: no file is written. The apply tests copy each real save into a temporary folder and
 work on the copy. The reader tests write each real save's CSV to a temporary folder. Your
 save folder is only read. Allow about ten minutes for the whole run.
 
