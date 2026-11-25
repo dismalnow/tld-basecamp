@@ -13,7 +13,7 @@ change finishes or advances an item, update this file in the same pull request.
 | F | Foundations: the tests run on GitHub, the wiki helper has tests, the folder has one decompressor, and coding agents have a context file | Done (pull requests 1 to 4) |
 | R | Reader depth: more of what a save holds, read correctly | Built (pull requests 5, 6 and 8). Open: the owner compares a few weights, liters and calories with the game's inventory screen |
 | I | Inventory edits: add an item, remove an item, repair everything, liters, calories, rounds | Built (pull requests 9 to 15), except for adding an item the inventory does not hold and film in the camera. Not tested in game. Open: the owner's session in the game, from the checklist in the block report |
-| P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | In progress |
+| P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | Built (pull requests 16 to 20). Not tested in game. `cure` covers five kinds of affliction, and the others wait for a save that holds one. Open: the owner's session in the game, from the checklist in the block report |
 | Trader | The Trader: read his state (trust, contacts, offers, special requests), a report command, and one edit (trust) | Not started. The owner has not yet confirmed the place in the order or the edit |
 | T | Live tracker: where animals, corpses, Tale objects and one-of-a-kind items are as of the last game save, then a watcher that follows new saves | Not started |
 | U | Front end: a standalone desktop client that follows the design of the C# editor | Not started |
@@ -47,7 +47,7 @@ change finishes or advances an item, update this file in the same pull request.
 | A value the game left out of the save | Built (pull request 17). Not tested in game. The game leaves a number out when it is 0. `set-player` puts it in as the first field of its record, where the game writes it, and checks that record on its own. A missing condition is left alone |
 | Skills | Built (pull request 18): `skills` lists the points of the nine skills, and `set-skill` changes the points of one. Not tested in game. The save holds points and no level, so the tool works in points |
 | Cure afflictions | Built (pull request 19) for the five kinds that a real save has shown in use or that are stored the same way: hypothermia, sprain pain, sprained ankles, sprained wrists and burns. `afflictions` lists them, and `cure` ends every case. Not tested in game. Other afflictions wait for a save that holds one |
-| Position | Not started. Inside the current scene only |
+| Position | Built (pull request 20): `position` prints the scene and where the character stands, and `set-position` moves the character inside that scene. Not tested in game. The tool does not know the ground, so the numbers have to come from a spot that is known to be good |
 
 ## What holds for every block
 

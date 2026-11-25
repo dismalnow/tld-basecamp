@@ -11,6 +11,7 @@ Usage:
     python tld_save_edit.py player SAVE
     python tld_save_edit.py skills SAVE
     python tld_save_edit.py afflictions SAVE
+    python tld_save_edit.py position SAVE
     python tld_save_edit.py set-count SAVE --item GEAR_NAME --count N --out NEW_FILE [--entry N]
     python tld_save_edit.py set-condition SAVE --item GEAR_NAME --condition PERCENT --out NEW_FILE [--entry N]
     python tld_save_edit.py set-liters SAVE --item GEAR_NAME --liters LITERS --out NEW_FILE [--entry N]
@@ -24,6 +25,7 @@ Usage:
                                             --out NEW_FILE
     python tld_save_edit.py set-skill SAVE --skill NAME --points N --out NEW_FILE
     python tld_save_edit.py cure SAVE --out NEW_FILE
+    python tld_save_edit.py set-position SAVE [--x X] [--y Y] [--z Z] --out NEW_FILE
 
 items lists everything in the player's inventory: entry number, item, count, condition.
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
@@ -50,8 +52,14 @@ afflictions lists five kinds of affliction: hypothermia, sprain pain, sprained a
 sprained wrists and burns. cure ends every case of those five that the save holds. A save
 can hold other afflictions. This tool does not read them and leaves them as they are.
 
+position prints the scene the save is in and where the character stands in it. set-position
+moves the character inside that scene: give one or more of --x, --y and --z, where y is the
+height. The tool does not know the ground, so take the numbers from a spot that is known to
+be good. Write a number that has an exponent after an equals sign: --y=-1.19E-07.
+
 set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item, set-player,
-set-skill and cure have not been tested in the game yet. Their own output says so.
+set-skill, cure and set-position have not been tested in the game yet. Their own output
+says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -61,9 +69,9 @@ Three checks stand between an edit and a written file:
     1. The original must pass the exact rebuild check (tld_save_codec.py verify).
     2. The edited save, decoded again, must differ from the original in exactly what was
        asked for: one value, for repair-all one condition for each repaired item, for
-       remove-item one inventory entry less, for copy-item one more, for set-player one
-       value for each option, and for cure the values that end each case. Every other
-       entry must be byte for byte unchanged.
+       remove-item one inventory entry less, for copy-item one more, for set-player and
+       set-position one value for each option, and for cure the values that end each
+       case. Every other entry must be byte for byte unchanged.
        When an edit puts in a number the game had left out, the record that got it is
        checked field by field as well.
     3. The file on disk is read back and compared with what was meant to be written.
@@ -99,6 +107,7 @@ MAX_LITERS = 999         # far above anything the game holds. The limit only cat
 MIN_CALORIES = 1.0       # an item with nothing left is one the game removes
 MAX_CALORIES = 9999.0    # the most in 14 real saves is 1750. The limit only catches a slip of the hand
 MAX_SKILL_POINTS = 9999  # the most in 14 real saves is 264. The limit only catches a slip of the hand
+MAX_COORDINATE = 100000.0    # the farthest in 14 real saves is 1980. The limit only catches a slip of the hand
 
 # Rounds a firearm holds at once. A save does not say. The rifle and the revolver are from the
 # game's wiki, and real saves agree: a rifle with 10 rounds, and revolvers whose rounds and spent
@@ -113,7 +122,7 @@ ROUNDS_HELD: Dict[str, int] = {
 
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
 NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item",
-                                "copy-item", "set-player", "set-skill", "cure"})
+                                "copy-item", "set-player", "set-skill", "cure", "set-position"})
 
 Difference = Tuple[str, str, str]
 
@@ -594,7 +603,8 @@ def _as_float32(value: float) -> float:
 
 def float32_literal(value: float) -> str:
     """A 32-bit float written the way the game writes it: 7 digits, or 9 when 7 do not give
-    the same float back. Meant for values from 0.0001 to 9999, which need no exponent."""
+    the same float back. Meant for 0 and for values of a size from 0.0001 to 100000, with
+    either sign, which need no exponent."""
     target = _as_float32(value)
     text = f"{target:.7g}"
     if _as_float32(float(text)) != target:
@@ -1875,6 +1885,143 @@ def cure_afflictions(original: bytes) -> CureEdit:
 
 
 # ---------------------------------------------------------------------------
+# Position
+# ---------------------------------------------------------------------------
+
+_PLAYER_MANAGER = "m_PlayerManagerSerialized"
+_POSITION = "m_SaveGamePosition"
+_ROPE_RECORD = "m_PlayerClimbRopeSerialized"
+_ROPE = "m_RopeGuid"
+AXES = ("x", "y", "z")    # the order of the three numbers in the save. y is the height
+
+# States in which this tool does not move the character: (the switch in the player's record, what it means).
+_HELD_IN_PLACE = (("m_PlayerInVehicle", "in a vehicle"), ("m_PlayerInSnowShelter", "in a snow shelter"))
+
+
+@dataclass(frozen=True)
+class Position:
+    scene: Optional[str]                      # the scene the save is in. None: the save does not say
+    stored: Optional[Tuple[str, str, str]]    # x, y and z as the save holds them. None: they cannot be read
+    held: Optional[str]                       # why this tool does not move the character: "in a vehicle"
+
+
+def _scene(save: DecodedSave) -> Optional[str]:
+    boot = save.entries.get("boot")
+    name = boot.get("m_SceneName") if isinstance(boot, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def _player_manager(save: DecodedSave) -> Optional[Dict[str, JsonValue]]:
+    document = save.entries.get("global")
+    record = document.get(_PLAYER_MANAGER) if isinstance(document, dict) else None
+    content = record.value if isinstance(record, NestedJson) else None
+    return content if isinstance(content, dict) else None
+
+
+def _position_numbers(save: DecodedSave) -> Optional[List[JsonValue]]:
+    """The list of the three numbers of the position. None when it is not stored as expected."""
+    manager = _player_manager(save)
+    held = manager.get(_POSITION) if manager is not None else None
+    if not isinstance(held, list) or len(held) != len(AXES):
+        return None
+    return held if all(_finite(number) is not None for number in held) else None
+
+
+def _held_in_place(save: DecodedSave) -> Optional[str]:
+    """Why this tool does not move the character. None when nothing stands in the way."""
+    manager = _player_manager(save)
+    for switch, meaning in _HELD_IN_PLACE:
+        # The game leaves a switch out of the save while it is off.
+        state = manager.get(switch, False) if manager is not None else False
+        if state is not False:
+            return meaning if state is True else f"in a state this tool cannot read ({switch})"
+    document = save.entries.get("global")
+    record = document.get(_ROPE_RECORD) if isinstance(document, dict) else None
+    content = record.value if isinstance(record, NestedJson) else None
+    rope = content.get(_ROPE) if isinstance(content, dict) else None
+    return "on a rope" if isinstance(rope, str) and rope else None
+
+
+def read_position(save: DecodedSave) -> Position:
+    """The scene the save is in, and where the character stands in it."""
+    numbers = _position_numbers(save)
+    stored = None if numbers is None else (_show(numbers[0]), _show(numbers[1]), _show(numbers[2]))
+    return Position(_scene(save), stored, _held_in_place(save))
+
+
+@dataclass(frozen=True)
+class PositionEdit:
+    data: bytes                                  # the edited save
+    scene: Optional[str]                         # the scene the save is in. It is not changed
+    changes: Tuple[Tuple[str, str, str], ...]    # (x, y or z, the number as stored, the new number)
+    kept: Tuple[Tuple[str, str], ...]            # (x, y or z, the number as stored) where the new one is equal
+    entries: int                                 # entries in the save
+    unchanged_entries: int                       # entries that are byte for byte the original
+
+
+def _check_coordinate(axis: str, value: float) -> None:
+    if not -MAX_COORDINATE <= value <= MAX_COORDINATE:
+        raise EditError(f"{axis} must be a number from -{MAX_COORDINATE:g} to {MAX_COORDINATE:g}, "
+                        f"not {value:g}")
+
+
+def stored_coordinate(axis: str, value: float) -> str:
+    """One number of a position the way this tool writes it into a save."""
+    _check_coordinate(axis, value)
+    if 0 < abs(value) < 0.0001:
+        raise EditError(f"{axis} {value!r} is too close to 0 for this tool to write. Use 0")
+    return float32_literal(abs(value) if value == 0 else value)
+
+
+def set_position(original: bytes, values: Dict[str, float]) -> PositionEdit:
+    """Return the save with the character moved inside the scene it is in. Reads and writes no file.
+
+    values gives the new number for one or more of x, y and z. A number the save holds
+    already stays as the game wrote it, and the edit goes ahead when one or more of the others
+    changes. Raises EditError for a name that is no axis, for a number outside the limits, for
+    a position that is not stored the way this tool expects, for a character in a vehicle, in
+    a snow shelter or on a rope, when nothing would change, and when the result differs from
+    the original in anything but the numbers asked for.
+    """
+    unknown = [name for name in values if name not in AXES]
+    if unknown or not values:
+        raise EditError("name one or more of " + ", ".join(AXES) + (f", not {unknown[0]}" if unknown else ""))
+    for axis, value in values.items():
+        _check_coordinate(axis, value)
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    numbers = _position_numbers(save)
+    if numbers is None:
+        raise EditError(f"the position is not stored the way this tool expects ({_PLAYER_MANAGER} > "
+                        f"{_POSITION}), so it is not changed")
+    held = _held_in_place(save)
+    if held is not None:
+        raise EditError(f"the character is {held} in this save, so this tool does not move it. Leave that "
+                        "state in the game, let the game save, and try again")
+    changes: List[Tuple[str, str, str]] = []
+    kept: List[Tuple[str, str]] = []
+    expected: List[Difference] = []
+    for index, axis in enumerate(AXES):
+        if axis not in values:
+            continue
+        old = _show(numbers[index])
+        if _as_float32(values[axis]) == _as_float32(float(old)):
+            kept.append((axis, old))
+            continue
+        new = stored_coordinate(axis, values[axis])
+        numbers[index] = Number(new)
+        changes.append((axis, old, new))
+        expected.append((f"{codec.ENTRY_TABLE} > global > {_PLAYER_MANAGER} > {_POSITION}[{index}]", old, new))
+    if not changes:
+        raise EditError("the character is at that position already. Nothing to change")
+    edited = codec.encode_save(save)
+    entries, unchanged = _prove_changes(original, edited, expected)
+    return PositionEdit(edited, _scene(save), tuple(changes), tuple(kept), entries, unchanged)
+
+
+# ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
 
@@ -2203,6 +2350,64 @@ def _run_cure(path: Path, out: Path) -> int:
     return 0
 
 
+def _scene_text(scene: Optional[str]) -> str:
+    return "the save does not name it" if scene is None else scene
+
+
+def _run_position(path: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        position = read_position(codec.decode_save(data))
+    except codec.SaveFormatError as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        return 1
+    print(f"Scene:     {_scene_text(position.scene)}")
+    if position.stored is None:
+        print(f"Position:  cannot be read: {_PLAYER_MANAGER} > {_POSITION} is not stored the way this tool "
+              "expects")
+    else:
+        print("Position:  " + ", ".join(f"{axis} {number}" for axis, number in zip(AXES, position.stored)))
+    if position.held is not None:
+        print(f"Held:      the character is {position.held}, so set-position does not move it")
+    print(f"Where the character stands in {path.name}. y is the height. The numbers count inside this scene "
+          "only.")
+    return 0
+
+
+def _run_position_edit(path: Path, out: Path, values: Dict[str, float]) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        check_new_file_path(out)
+        edit = set_position(data, values)
+        write_new_file(out, edit.data)
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 1
+    count = len(edit.changes)
+    print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
+    print(f"Scene:    {_scene_text(edit.scene)}. It is not changed, and the numbers count inside it only")
+    for axis, old, new in edit.changes:
+        print(f"Change:   {axis} {old} -> {new}")
+    for axis, old in edit.kept:
+        print(f"Same:     {axis} is {old} already")
+    print("Checked:  the edited save differs from the original in exactly "
+          + ("this one value" if count == 1 else f"these {count} values"))
+    print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
+          "(all except global)")
+    if "set-position" in NOT_TESTED_IN_GAME:
+        print("Untested: no save changed by set-position has been loaded in the game yet. Try it on a save "
+              "you can afford to lose")
+    print(f"Written:  {out}, {len(edit.data):,} bytes")
+    print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
+    print(f"{path.name} itself was not changed.")
+    return 0
+
+
 def _percent(stored: str) -> str:
     return f"{float(stored) * 100:.1f}%"
 
@@ -2374,6 +2579,8 @@ Examples:
   python tld_save_edit.py set-skill sandbox15 --skill cooking --points 150 --out sandbox15.edited
   python tld_save_edit.py afflictions sandbox15
   python tld_save_edit.py cure sandbox15 --out sandbox15.edited
+  python tld_save_edit.py position sandbox15
+  python tld_save_edit.py set-position sandbox15 --x -0.8 --y 0.02 --z -1.4 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -2387,7 +2594,8 @@ option was wrong.
                        ("weapons", "list the inventory items that can hold rounds"),
                        ("player", "list the player's condition, calories, hydration, rest and warmth"),
                        ("skills", "list the points of the nine skills"),
-                       ("afflictions", "list hypothermia, sprain pain, sprained ankles and wrists, and burns")):
+                       ("afflictions", "list hypothermia, sprain pain, sprained ankles and wrists, and burns"),
+                       ("position", "print the scene the save is in and where the character stands")):
         listing = commands.add_parser(name, help=text)
         listing.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
     set_count = commands.add_parser("set-count", help="change the count of one inventory stack")
@@ -2510,9 +2718,25 @@ option was wrong.
     cure.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
     cure.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                       help="the file to create. It must not exist yet")
+    set_position_ = commands.add_parser("set-position", help="move the character inside the scene it is in "
+                                                             "(not tested in the game yet)")
+    set_position_.add_argument("save", type=Path, metavar="SAVE",
+                               help="the save file to read. It is not changed")
+    for axis, meaning in zip(AXES, ("the new x", "the new y, which is the height", "the new z")):
+        set_position_.add_argument(f"--{axis}", type=float, metavar=axis.upper(),
+                                   help=f"{meaning}, from -{MAX_COORDINATE:g} to {MAX_COORDINATE:g}")
+    set_position_.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                               help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command == "player":
         return _run_player(args.save)
+    if args.command == "position":
+        return _run_position(args.save)
+    if args.command == "set-position":
+        moved = {axis: getattr(args, axis) for axis in AXES if getattr(args, axis) is not None}
+        if not moved:
+            parser.error("set-position needs one or more of " + ", ".join(f"--{axis}" for axis in AXES))
+        return _run_position_edit(args.save, args.out, moved)
     if args.command == "afflictions":
         return _run_afflictions(args.save)
     if args.command == "cure":

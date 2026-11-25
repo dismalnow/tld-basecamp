@@ -28,7 +28,8 @@ from unittest import mock
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import Affliction, EditError, Food, Item, Liquid, PlayerValue, Skill, Stack, Weapon
+from tld_save_edit import (Affliction, EditError, Food, Item, Liquid, PlayerValue, Position, Skill, Stack,
+                           Weapon)
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -3008,6 +3009,303 @@ class CureTests(unittest.TestCase):
                 self.assertIn(f"1 not asked for (m_Dict > global > {change})", message)
 
 
+STANDS = ("-1.464066", "-0.5301075", "-1.0880059")
+POSITION_PATH = "m_Dict > global > m_PlayerManagerSerialized > m_SaveGamePosition"
+
+
+def position_save(position: Sequence[JsonValue] = STANDS, switches: Optional[Dict[str, JsonValue]] = None,
+                  rope: JsonValue = "", records: Optional[Dict[str, JsonValue]] = None) -> bytes:
+    """A save with the player's record, the way the game writes it, in the scene GreyMothersHouseA.
+
+    position gives the numbers of the position: text for a number, or any other value to put in
+    its place. switches adds fields to the player's record, such as m_PlayerInVehicle. rope is
+    what the save holds as the rope the character is on. records puts another value where a
+    whole record belongs, by the name of the record.
+    """
+    manager: Dict[str, JsonValue] = {
+        "m_SaveGamePosition": [Number(held) if isinstance(held, str) else held for held in position],
+        "m_SaveGameRotation": [Number("0.00301616569"), Number("0.9909711"), Number("-0.13211897"),
+                               Number("0.0226230379")],
+        "m_StartGearAppliedProxy": True,
+        **(switches or {}),
+        # In real saves this is the position with the height of the eyes added to y.
+        "m_PlayerInVehicleCameraPos": [Number("-1.464066"), Number("1.2198925"), Number("-1.0880059")],
+        "m_KnownCodes": [],
+    }
+    whole: Dict[str, JsonValue] = {
+        "m_GameManagerSerialized": NestedJson({"m_SceneTransitionDataSerialized": NestedJson({
+            "m_TeleportPlayerSaveGamePosition": True,
+            "m_PosBeforeInteriorLoad": [Number("1105.48022"), Number("271.216553"), Number("1783.8783")],
+            "m_SceneSaveFilenameCurrent": "GreyMothersHouseA"})}),
+        "m_PlayerManagerSerialized": NestedJson(manager),
+        "m_PlayerClimbRopeSerialized": NestedJson({"m_RopeGuid": rope}),
+        "m_Inventory_Serialized": NestedJson(
+            {"m_SerializedItems": [item(*spec) for spec in DEFAULT_ITEMS], "m_QuickSelectInstanceIDs": []}),
+    }
+    whole.update(records or {})
+    return build_save(scene="GreyMothersHouseA", global_document=whole)
+
+
+class PositionListTests(unittest.TestCase):
+    def read(self, save: bytes) -> Position:
+        return edit.read_position(codec.decode_save(save))
+
+    def test_the_scene_and_the_three_numbers_are_read(self) -> None:
+        self.assertEqual(self.read(position_save()), Position("GreyMothersHouseA", STANDS, None))
+        self.assertEqual(edit.AXES, ("x", "y", "z"))
+
+    def test_a_number_is_read_the_way_the_save_holds_it(self) -> None:
+        stands = ("6.53425", "-1.1920929E-07", "8.391384")
+        self.assertEqual(self.read(position_save(stands)).stored, stands)
+
+    def test_a_save_that_does_not_name_its_scene(self) -> None:
+        for name, boot in (("no name", {}), ("an empty name", {"m_SceneName": ""}),
+                           ("a name that is no text", {"m_SceneName": Number("5")}), ("no boot entry", None)):
+            with self.subTest(name):
+                save = codec.decode_save(position_save())
+                save.slot["m_Dict"]["boot"] = boot
+                self.assertEqual(edit.read_position(save), Position(None, STANDS, None))
+
+    def test_what_holds_the_character_in_place(self) -> None:
+        cases = {
+            "in a vehicle": position_save(switches={"m_PlayerInVehicle": True}),
+            "in a snow shelter": position_save(switches={"m_PlayerInSnowShelter": True}),
+            "on a rope": position_save(rope="b7c1f2de-0d7c-4f43-9d6a-3f5f0f6f2a10"),
+            "in a state this tool cannot read (m_PlayerInVehicle)": position_save(
+                switches={"m_PlayerInVehicle": Number("1")}),
+            "in a state this tool cannot read (m_PlayerInSnowShelter)": position_save(
+                switches={"m_PlayerInSnowShelter": None}),
+        }
+        for held, save in cases.items():
+            with self.subTest(held):
+                self.assertEqual(self.read(save), Position("GreyMothersHouseA", STANDS, held))
+
+    def test_what_does_not_hold_the_character_in_place(self) -> None:
+        cases = {
+            # The old C# editor writes the two switches when they are off.
+            "switches that are off": position_save(switches={"m_PlayerInVehicle": False,
+                                                             "m_PlayerInSnowShelter": False}),
+            "no record of a rope": position_save(records={"m_PlayerClimbRopeSerialized": None}),
+            "a record of a rope that is no nested document": position_save(
+                records={"m_PlayerClimbRopeSerialized": {"m_RopeGuid": "b7c1f2de"}}),
+            "a rope that is no text": position_save(rope=None),
+        }
+        for name, save in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(self.read(save).held)
+
+    def test_positions_that_cannot_be_read_are_marked(self) -> None:
+        manager = "m_PlayerManagerSerialized"
+        cases = {
+            "two numbers": position_save(STANDS[:2]),
+            "four numbers": position_save(STANDS + ("1.0",)),
+            "text for a number": position_save(("-1.464066", NestedJson("-0.5301075"), "-1.0880059")),
+            "a number that is not finite": position_save(("-1.464066", "Infinity", "-1.0880059")),
+            "no number at all": position_save(("-1.464066", "NaN", "-1.0880059")),
+            "true for a number": position_save(("-1.464066", True, "-1.0880059")),
+            "no list": position_save(records={manager: NestedJson({"m_SaveGamePosition": Number("3")})}),
+            "no position": position_save(records={manager: NestedJson({"m_KnownCodes": []})}),
+            "no record of the player": position_save(records={manager: None}),
+            "a record of the player that is no nested document": position_save(
+                records={manager: {"m_SaveGamePosition": [Number("1.0"), Number("2.0"), Number("3.0")]}}),
+            "a nested document that is no record": position_save(records={manager: NestedJson([])}),
+        }
+        for name, save in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.read(save), Position("GreyMothersHouseA", None, None))
+
+
+class SetPositionTests(unittest.TestCase):
+    def refusal(self, values: Dict[str, float], save: Optional[bytes] = None) -> str:
+        with self.assertRaises(EditError) as refused:
+            edit.set_position(position_save() if save is None else save, values)
+        return str(refused.exception)
+
+    def test_the_three_numbers_change_and_nothing_else(self) -> None:
+        original = position_save()
+        result = edit.set_position(original, {"x": -0.797, "y": 0.0165060163, "z": -1.38356638})
+        self.assertEqual(result.changes, (("x", "-1.464066", "-0.797"), ("y", "-0.5301075", "0.0165060163"),
+                                          ("z", "-1.0880059", "-1.38356638")))
+        self.assertEqual((result.scene, result.kept), ("GreyMothersHouseA", ()))
+        # Built independently, with those three numbers.
+        self.assertEqual(result.data, position_save(("-0.797", "0.0165060163", "-1.38356638")))
+        self.assertEqual(slot_differences(original, result.data), [
+            (f"{POSITION_PATH}[0]", "-1.464066", "-0.797"),
+            (f"{POSITION_PATH}[1]", "-0.5301075", "0.0165060163"),
+            (f"{POSITION_PATH}[2]", "-1.0880059", "-1.38356638"),
+        ])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_one_number_alone_changes(self) -> None:
+        for axis, given, stands in (("x", 12.5, ("12.5", "-0.5301075", "-1.0880059")),
+                                    ("y", 0, ("-1.464066", "0.0", "-1.0880059")),
+                                    ("z", -250.75, ("-1.464066", "-0.5301075", "-250.75"))):
+            with self.subTest(axis):
+                place = edit.AXES.index(axis)
+                result = edit.set_position(position_save(), {axis: given})
+                self.assertEqual(result.changes, ((axis, STANDS[place], stands[place]),))
+                self.assertEqual(result.data, position_save(stands))
+                self.assertEqual(result.kept, ())
+
+    def test_the_numbers_are_changed_in_the_order_of_the_save(self) -> None:
+        result = edit.set_position(position_save(), {"z": 3, "x": 1, "y": 2})
+        self.assertEqual([axis for axis, _, _ in result.changes], ["x", "y", "z"])
+        self.assertEqual(result.data, position_save(("1.0", "2.0", "3.0")))
+
+    def test_a_number_the_save_holds_already_stays(self) -> None:
+        original = position_save()
+        result = edit.set_position(original, {"x": 4.25, "y": -0.5301075, "z": -1.0880059})
+        self.assertEqual(result.changes, (("x", "-1.464066", "4.25"),))
+        self.assertEqual(result.kept, (("y", "-0.5301075"), ("z", "-1.0880059")))
+        self.assertEqual(result.data, position_save(("4.25", "-0.5301075", "-1.0880059")))
+        self.assertEqual(slot_differences(original, result.data),
+                         [(f"{POSITION_PATH}[0]", "-1.464066", "4.25")])
+
+    def test_a_number_this_tool_could_not_write_stays_when_the_save_holds_it(self) -> None:
+        # The game writes a number this close to 0 with an exponent. Given back as it is, it stays.
+        original = position_save(("6.53425", "-1.1920929E-07", "8.391384"))
+        result = edit.set_position(original, {"x": 7, "y": -1.1920929e-07, "z": 8.391384})
+        self.assertEqual(result.changes, (("x", "6.53425", "7.0"),))
+        self.assertEqual(result.kept, (("y", "-1.1920929E-07"), ("z", "8.391384")))
+        self.assertEqual(result.data, position_save(("7.0", "-1.1920929E-07", "8.391384")))
+        self.assertEqual(self.refusal({"y": -1.1920929e-07}, original),
+                         "the character is at that position already. Nothing to change")
+        self.assertEqual(self.refusal({"y": -1.2e-07}, original),
+                         "y -1.2e-07 is too close to 0 for this tool to write. Use 0")
+
+    def test_a_position_the_save_holds_already_is_refused(self) -> None:
+        message = "the character is at that position already. Nothing to change"
+        self.assertEqual(self.refusal({"x": -1.464066, "y": -0.5301075, "z": -1.0880059}), message)
+        self.assertEqual(self.refusal({"y": -0.5301075}), message)
+        # The same number written another way is the same number.
+        self.assertEqual(self.refusal({"x": 2}, position_save(("2", "-0.5301075", "-1.0880059"))), message)
+
+    def test_numbers_are_written_the_way_the_game_writes_a_32_bit_float(self) -> None:
+        for given, stored in ((1234.56789, "1234.56787"), (1980.29382, "1980.29382"),
+                              (-283.880341, "-283.880341"),
+                              (0, "0.0"), (-0.0, "0.0"), (0.0001, "0.0001"), (-0.0001, "-0.0001"),
+                              (100000, "100000.0"), (-100000, "-100000.0"), (99999.99, "99999.99"),
+                              (687.839, "687.839"), (-6.333225, "-6.333225")):
+            with self.subTest(given=given):
+                self.assertEqual(edit.stored_coordinate("x", given), stored)
+        result = edit.set_position(position_save(), {"x": 1234.56789, "y": -0.0})
+        self.assertEqual(result.data, position_save(("1234.56787", "0.0", "-1.0880059")))
+
+    def test_a_number_the_game_wrote_with_an_exponent_can_be_replaced(self) -> None:
+        original = position_save(("6.53425", "-1.1920929E-07", "8.391384"))
+        result = edit.set_position(original, {"y": 0})
+        self.assertEqual(result.changes, (("y", "-1.1920929E-07", "0.0"),))
+        self.assertEqual(result.data, position_save(("6.53425", "0.0", "8.391384")))
+
+    def test_numbers_outside_the_limits_are_refused(self) -> None:
+        # 1e39 is too large for a 32-bit float.
+        for given in (100000.5, -100000.5, 1e39, -1e39, float("nan"), float("inf"), float("-inf")):
+            for axis in edit.AXES:
+                with self.subTest(axis=axis, given=given):
+                    self.assertEqual(self.refusal({axis: given}),
+                                     f"{axis} must be a number from -100000 to 100000, not {given:g}")
+
+    def test_the_limits_are_checked_before_the_save_is_read(self) -> None:
+        self.assertEqual(self.refusal({"x": 5, "z": 100001}, b"not a save"),
+                         "z must be a number from -100000 to 100000, not 100001")
+
+    def test_a_number_too_close_to_zero_to_write_is_refused(self) -> None:
+        self.assertEqual(self.refusal({"y": 0.00001}),
+                         "y 1e-05 is too close to 0 for this tool to write. Use 0")
+        self.assertEqual(self.refusal({"z": -0.00009}),
+                         "z -9e-05 is too close to 0 for this tool to write. Use 0")
+
+    def test_names_that_are_no_axis_are_refused(self) -> None:
+        self.assertEqual(self.refusal({"w": 1, "x": 2}), "name one or more of x, y, z, not w")
+        self.assertEqual(self.refusal({}), "name one or more of x, y, z")
+
+    def test_a_character_held_in_place_is_not_moved(self) -> None:
+        advice = (" in this save, so this tool does not move it. Leave that state in the game, let the game "
+                  "save, and try again")
+        cases = {
+            "in a vehicle": position_save(switches={"m_PlayerInVehicle": True}),
+            "in a snow shelter": position_save(switches={"m_PlayerInSnowShelter": True}),
+            "on a rope": position_save(rope="b7c1f2de-0d7c-4f43-9d6a-3f5f0f6f2a10"),
+            "in a state this tool cannot read (m_PlayerInVehicle)": position_save(
+                switches={"m_PlayerInVehicle": "yes"}),
+        }
+        for held, save in cases.items():
+            with self.subTest(held):
+                self.assertEqual(self.refusal({"x": 5}, save), f"the character is {held}{advice}")
+        off = position_save(switches={"m_PlayerInVehicle": False, "m_PlayerInSnowShelter": False})
+        self.assertEqual(edit.set_position(off, {"x": 5}).changes, (("x", "-1.464066", "5.0"),))
+
+    def test_positions_that_cannot_be_read_are_refused(self) -> None:
+        message = ("the position is not stored the way this tool expects (m_PlayerManagerSerialized > "
+                   "m_SaveGamePosition), so it is not changed")
+        gone = {"m_PlayerManagerSerialized": None}
+        for name, save in (("two numbers", position_save(STANDS[:2])),
+                           ("a number that is not finite", position_save(("1.0", "Infinity", "3.0"))),
+                           ("text for a number", position_save(("1.0", NestedJson("2.0"), "3.0"))),
+                           ("no record of the player", position_save(records=gone))):
+            with self.subTest(name):
+                self.assertEqual(self.refusal({"x": 5}, save), message)
+
+    def test_one_refused_number_stops_the_whole_edit(self) -> None:
+        original = position_save()
+        kept = bytes(original)
+        for values in ({"x": 5, "y": 100000.5}, {"x": 5, "z": 0.00001}):
+            with self.subTest(values=values):
+                with self.assertRaises(EditError):
+                    edit.set_position(original, values)
+        self.assertEqual(original, kept)
+
+    def test_what_else_the_save_holds_about_the_place_stays(self) -> None:
+        result = edit.set_position(position_save(), {"x": 5, "y": 6, "z": 7})
+        document = codec.decode_save(result.data).entries["global"]
+        manager = document["m_PlayerManagerSerialized"].value
+        self.assertEqual(manager["m_PlayerInVehicleCameraPos"],
+                         [Number("-1.464066"), Number("1.2198925"), Number("-1.0880059")])
+        self.assertEqual(manager["m_SaveGameRotation"][1], Number("0.9909711"))
+        before = codec.decode_save(position_save())
+        self.assertEqual(codec.decode_save(result.data).entries["boot"], before.entries["boot"])
+        self.assertEqual(document["m_GameManagerSerialized"],
+                         before.entries["global"]["m_GameManagerSerialized"])
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = position_save()
+        kept = bytes(original)
+        edit.set_position(original, {"x": 5, "y": 6, "z": 7})
+        self.assertEqual(original, kept)
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        self.assertIn("does not pass the exact rebuild check", self.refusal({"x": 5}, b"not a save"))
+
+    def caught(self, wrong: bytes) -> str:
+        """What the tool says when the encoder hands back wrong in place of the save moved to x 5 and z 7."""
+        with encoding_as(position_save(("5.0", "-0.5301075", "7.0")), wrong):
+            with self.assertRaises(EditError) as refused:
+                edit.set_position(position_save(), {"x": 5, "z": 7})
+        return str(refused.exception)
+
+    def test_a_number_that_was_not_written_is_caught(self) -> None:
+        message = self.caught(position_save(("5.0", "-0.5301075", "-1.0880059")))
+        self.assertIn("did not change exactly the 2 values asked for", message)
+        self.assertIn(f"1 asked for and not made ({POSITION_PATH}[2]: -1.0880059 -> 7.0)", message)
+
+    def test_a_number_written_wrongly_is_caught(self) -> None:
+        message = self.caught(position_save(("5.0", "-0.5301075", "7.5")))
+        self.assertIn(f"{POSITION_PATH}[2]: -1.0880059 -> 7.5", message)
+
+    def test_a_number_that_was_not_asked_for_is_caught(self) -> None:
+        message = self.caught(position_save(("5.0", "0.0", "7.0")))
+        self.assertIn(f"1 not asked for ({POSITION_PATH}[1]: -0.5301075 -> 0.0)", message)
+
+    def test_a_change_to_the_place_of_the_camera_is_caught(self) -> None:
+        save = codec.decode_save(position_save(("5.0", "-0.5301075", "7.0")))
+        manager = save.entries["global"]["m_PlayerManagerSerialized"].value
+        manager["m_PlayerInVehicleCameraPos"][0] = Number("5.0")
+        message = self.caught(codec.encode_save(save))
+        self.assertIn("1 not asked for (m_Dict > global > m_PlayerManagerSerialized > "
+                      "m_PlayerInVehicleCameraPos[0]: -1.464066 -> 5.0)", message)
+
+
 class NewFileTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -3314,7 +3612,8 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("Untested", out)
         self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds",
                                                              "repair-all", "remove-item", "copy-item",
-                                                             "set-player", "set-skill", "cure"}))
+                                                             "set-player", "set-skill", "cure",
+                                                             "set-position"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -4187,8 +4486,168 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertIn("Not found", err)
 
+    def test_position_prints_the_scene_and_the_three_numbers(self) -> None:
+        self.save.write_bytes(position_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("position", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines(), [
+            "Scene:     GreyMothersHouseA",
+            "Position:  x -1.464066, y -0.5301075, z -1.0880059",
+            "Where the character stands in sandbox15. y is the height. The numbers count inside this scene "
+            "only.",
+        ])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_position_says_what_holds_the_character_in_place(self) -> None:
+        self.save.write_bytes(position_save(switches={"m_PlayerInVehicle": True}))
+        code, out, err = self.run_command("position", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[1:3], [
+            "Position:  x -1.464066, y -0.5301075, z -1.0880059",
+            "Held:      the character is in a vehicle, so set-position does not move it",
+        ])
+
+    def test_position_marks_what_it_cannot_read(self) -> None:
+        save = codec.decode_save(position_save(STANDS[:2]))
+        save.slot["m_Dict"]["boot"] = {}
+        self.save.write_bytes(codec.encode_save(save))
+        code, out, err = self.run_command("position", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[:2], [
+            "Scene:     the save does not name it",
+            "Position:  cannot be read: m_PlayerManagerSerialized > m_SaveGamePosition is not stored the way "
+            "this tool expects",
+        ])
+
+    def test_position_on_something_that_is_no_save(self) -> None:
+        self.save.write_bytes(b"not a save")
+        code, out, err = self.run_command("position", str(self.save))
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Refused:", err)
+        code, out, err = self.run_command("position", str(self.folder / "sandbox99"))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
+    def test_set_position_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(position_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("set-position", str(self.save), "--x", "-0.797",
+                                          "--y", "0.0165060163", "--z", "-1.38356638", "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), position_save(("-0.797", "0.0165060163", "-1.38356638")))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], f"Save:     sandbox15, {len(position_save()):,} bytes, passes the exact "
+                                   "rebuild check")
+        self.assertEqual(lines[1:7], [
+            "Scene:    GreyMothersHouseA. It is not changed, and the numbers count inside it only",
+            "Change:   x -1.464066 -> -0.797",
+            "Change:   y -0.5301075 -> 0.0165060163",
+            "Change:   z -1.0880059 -> -1.38356638",
+            "Checked:  the edited save differs from the original in exactly these 3 values",
+            "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
+        ])
+        self.assertEqual(lines[7], "Untested: no save changed by set-position has been loaded in the game yet. "
+                                   "Try it on a save you can afford to lose")
+        self.assertEqual(lines[8], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[9], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[10:], ["sandbox15 itself was not changed."])
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_set_position_names_a_number_that_stays(self) -> None:
+        self.save.write_bytes(position_save())
+        code, out, err = self.run_command("set-position", str(self.save), "--y", "-0.5301075", "--z", "0",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), position_save(("-1.464066", "-0.5301075", "0.0")))
+        self.assertEqual(out.splitlines()[2:5], [
+            "Change:   z -1.0880059 -> 0.0",
+            "Same:     y is -0.5301075 already",
+            "Checked:  the edited save differs from the original in exactly this one value",
+        ])
+
+    def test_set_position_takes_each_number_by_its_own_option(self) -> None:
+        for option, given, stands in (("--x", "-5.5", ("-5.5", "-0.5301075", "-1.0880059")),
+                                      ("--y", "12", ("-1.464066", "12.0", "-1.0880059")),
+                                      ("--z", "0.25", ("-1.464066", "-0.5301075", "0.25")),
+                                      # 0 is a number like any other, and not a number left out.
+                                      ("--x", "0", ("0.0", "-0.5301075", "-1.0880059"))):
+            with self.subTest(option=option, given=given):
+                out_file = self.folder / f"sandbox15.{option[2:]}{given}"
+                self.save.write_bytes(position_save())
+                code, out, err = self.run_command("set-position", str(self.save), option, given,
+                                                  "--out", str(out_file))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(out_file.read_bytes(), position_save(stands))
+
+    def test_set_position_takes_a_number_with_an_exponent_after_an_equals_sign(self) -> None:
+        # The game writes a number this close to 0 with an exponent. Given back as it is, it stays.
+        self.save.write_bytes(position_save(("6.53425", "-1.1920929E-07", "8.391384")))
+        code, out, err = self.run_command("set-position", str(self.save), "--x", "7", "--y=-1.1920929E-07",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), position_save(("7.0", "-1.1920929E-07", "8.391384")))
+        self.assertEqual(out.splitlines()[2:4], ["Change:   x 6.53425 -> 7.0",
+                                                 "Same:     y is -1.1920929E-07 already"])
+
+    def test_set_position_refusals_write_nothing(self) -> None:
+        existing = self.folder / "taken.edited"
+        existing.write_bytes(b"already here")
+        cases = {
+            "held in place": (position_save(switches={"m_PlayerInVehicle": True}), ["--x", "5"], self.out,
+                              "the character is in a vehicle in this save"),
+            "there already": (position_save(), ["--x", "-1.464066"], self.out,
+                              "the character is at that position already"),
+            "too far": (position_save(), ["--x", "100001"], self.out,
+                        "x must be a number from -100000 to 100000, not 100001"),
+            "one of two is refused": (position_save(), ["--x", "5", "--z", "0.00001"], self.out,
+                                      "z 1e-05 is too close to 0"),
+            "output exists": (position_save(), ["--x", "5"], existing, "already exists"),
+        }
+        for name, (save, options, out_file, message) in cases.items():
+            with self.subTest(name):
+                self.save.write_bytes(save)
+                before = self.snapshot()
+                code, printed, err = self.run_command("set-position", str(self.save), *options,
+                                                      "--out", str(out_file))
+                self.assertEqual(code, 1)
+                self.assertIn("Refused:", err)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(printed, "")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(existing.read_bytes(), b"already here")
+                self.assertFalse(self.out.exists())
+
+    def test_set_position_checks_the_output_path_before_any_edit_work(self) -> None:
+        self.save.write_bytes(position_save())
+        with mock.patch.object(edit, "set_position") as attempted:
+            code, _, _ = self.run_command("set-position", str(self.save), "--x", "5",
+                                          "--out", str(self.folder / "sandbox16"))
+        self.assertEqual(code, 1)
+        attempted.assert_not_called()
+
+    def test_set_position_on_a_missing_save_is_a_usage_error(self) -> None:
+        code, out, err = self.run_command("set-position", str(self.folder / "sandbox99"), "--x", "5",
+                                          "--out", str(self.out))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
+    def test_set_position_without_a_number_names_the_options(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+            edit.main(["set-position", str(self.save), "--out", str(self.out)])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("set-position needs one or more of --x, --y, --z", err.getvalue())
+        self.assertFalse(self.out.exists())
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)], ["repair-all", str(self.save)],
+                          ["set-position", str(self.save), "--x", "5"],
+                          ["set-position", str(self.save), "--x", "east", "--out", str(self.out)],
+                          ["set-position", str(self.save), "--x", "--out", str(self.out)],
                           ["cure", str(self.save)],
                           ["cure", str(self.save), "--only", "burns", "--out", str(self.out)],
                           ["set-skill", str(self.save), "--skill", "cooking", "--out", str(self.out)],
@@ -4660,6 +5119,49 @@ class RealSaveTests(unittest.TestCase):
                 after = edit.list_afflictions(codec.decode_save(result.data))
                 self.assertEqual([(kind.name, kind.cases) for kind in after],
                                  [(kind.name, 0) for kind in before])
+
+    def test_the_position_can_be_read_in_every_real_save(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            with self.subTest(save=path.name):
+                position = edit.read_position(codec.decode_save(path.read_bytes()))
+                self.assertIsNotNone(position.scene)
+                self.assertIsNotNone(position.stored)
+                for number in position.stored:
+                    self.assertLessEqual(abs(float(number)), edit.MAX_COORDINATE)
+                    # A number the save holds is in the form this tool writes.
+                    if abs(float(number)) >= 0.0001:
+                        self.assertEqual(edit.stored_coordinate("x", float(number)), number)
+
+    def test_the_character_can_be_moved_in_every_real_save(self) -> None:
+        """In memory only. No file is written. A character that is held in place must be refused."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.read_position(codec.decode_save(original))
+                # x moves, y is given as it is and stays, z moves.
+                wanted = {"x": float(before.stored[0]) + 1.5, "y": float(before.stored[1]),
+                          "z": float(before.stored[2]) - 2.25}
+                if before.held is not None:
+                    with self.assertRaises(EditError) as refused:
+                        edit.set_position(original, wanted)
+                    self.assertIn(f"the character is {before.held} in this save", str(refused.exception))
+                    continue
+                result = edit.set_position(original, wanted)
+                moved = (edit.stored_coordinate("x", wanted["x"]), before.stored[1],
+                         edit.stored_coordinate("z", wanted["z"]))
+                self.assertEqual(result.changes, (("x", before.stored[0], moved[0]),
+                                                  ("z", before.stored[2], moved[2])))
+                self.assertEqual(result.kept, (("y", before.stored[1]),))
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                self.assertEqual(edit.read_position(codec.decode_save(result.data)),
+                                 Position(before.scene, moved, None))
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])
