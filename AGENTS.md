@@ -33,7 +33,7 @@ python -m unittest                       # the whole suite, a few seconds
 python -m unittest test_tld_save_edit    # one test file
 ```
 
-To include the checks against real saves (they only read the saves, and take about five
+To include the checks against real saves (they only read the saves, and take about ten
 minutes), point `TLD_SAVE_DIR` at a save folder first. In PowerShell:
 
 ```

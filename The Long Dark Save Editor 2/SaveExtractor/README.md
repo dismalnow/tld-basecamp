@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once |
+| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -121,6 +121,7 @@ except `repair-all`, which works on all of them.
 | `set-calories` | The calories left in a food item | Not yet. Its own output says so |
 | `set-rounds` | The rounds loaded in a rifle, a revolver or a distress pistol | Not yet. Its own output says so |
 | `repair-all` | The condition of every item below 100% | Not yet. Its own output says so |
+| `remove-item` | One item, or one whole stack, leaves the inventory | Not yet. Its own output says so |
 
 ### Count
 
@@ -361,14 +362,58 @@ Things to know about `repair-all`:
 - In 14 real saves the inventories hold 1,143 items: 657 at 100%, 484 that a repair changes,
   and 2 burned torches. None is ruined.
 
+### Remove an item
+
+Not tested in the game yet: nobody has loaded a save changed by `remove-item`. Try it on a
+save you can afford to lose.
+
+```powershell
+python tld_save_edit.py items $save
+python tld_save_edit.py remove-item $save --item GEAR_Crackers --entry 11 --out "$env:TEMP\sandbox15.edited"
+```
+
+`remove-item` takes one item out of the inventory. A stack goes as a whole: to take a few
+units out of a stack, use `set-count`. When the inventory holds more than one of an item,
+add `--entry` with the number from `items`.
+
+```text
+Save:     sandbox15, 585,798 bytes, passes the exact rebuild check
+Item:     GEAR_Crackers, inventory entry 11
+Change:   removed (condition 95.8%). 442 entries are left in the inventory
+Note:     every entry number above 11 is now one lower. Run items again before the next edit
+Checked:  the edited inventory is the original one without this entry, and nothing else differs
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by remove-item has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,617 bytes
+SHA-256:  b4d6df6e56608838cf623e0b9b4c88476ae56ccd9f9db635b01093144c90a893
+sandbox15 itself was not changed.
+```
+
+Things to know about `remove-item`:
+
+- Every entry number above the removed one moves down by one. Run `items` again before the
+  next edit.
+- The tool leaves some items in place and says why:
+  - The two entries that hold the water you carry. Every real save has both. Use
+    `set-liters` to empty them.
+  - Clothing you are wearing. Take it off in the game first.
+  - The item in your hands, and the last item you held. The save remembers both by the
+    item's instance number, and that number would then point at nothing.
+  - Any other item whose instance number appears a second time anywhere in the save. In 14
+    real saves that happens only for the item in the hands and the last item held.
+- The two saves differ in one place, the length of the inventory list. The comparison does
+  not look inside a list that changed its length, so the tool then checks every item that is
+  left against the original list.
+- The C# editor removes an item from the list without any of these checks.
+
 ### The checks
 
 Three checks stand between an edit and a written file. If one fails, nothing is left on disk.
 
 1. The original must pass `tld_save_codec.py verify`.
 2. The edited save, decoded again, must differ from the original in exactly what was asked
-   for: one value, or for `repair-all` one condition for each repaired item. Every other
-   entry must be byte for byte unchanged.
+   for: one value, for `repair-all` one condition for each repaired item, and for
+   `remove-item` one inventory entry less. Every other entry must be byte for byte unchanged.
 3. The new file is read back and compared with what was meant to be written.
 
 The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
@@ -541,10 +586,10 @@ python -m unittest -v
 
 With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
 liquid, one amount of calories and the rounds of one weapon in each real save that has
-them, and repair every real inventory. That happens in memory only: no file is written. The apply tests copy each real
-save into a temporary folder and work on the copy. The reader tests write each real save's
-CSV to a temporary folder. Your save folder is only read. Allow about five minutes for the
-whole run.
+them, repair every real inventory, and take one item out of each. That happens in memory
+only: no file is written. The apply tests copy each real save into a temporary folder and
+work on the copy. The reader tests write each real save's CSV to a temporary folder. Your
+save folder is only read. Allow about ten minutes for the whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.

@@ -14,6 +14,7 @@ Usage:
     python tld_save_edit.py set-calories SAVE --item GEAR_NAME --calories CALORIES --out NEW_FILE [--entry N]
     python tld_save_edit.py set-rounds SAVE --item GEAR_NAME --rounds N --out NEW_FILE [--entry N]
     python tld_save_edit.py repair-all SAVE --out NEW_FILE
+    python tld_save_edit.py remove-item SAVE --item GEAR_NAME --out NEW_FILE [--entry N]
 
 items lists everything in the player's inventory: entry number, item, count, condition.
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
@@ -24,10 +25,11 @@ can, or the fuel in a lamp. set-calories changes the calories left in one food i
 set-rounds changes the rounds loaded in one rifle, revolver or distress pistol. Add
 --entry when the inventory holds more than one of that item. repair-all sets the
 condition of every item in the inventory to 100%, except ruined items and torches and
-flares that have burned.
+flares that have burned. remove-item takes one item, or one whole stack, out of the
+inventory.
 
-set-liters, set-calories, set-rounds and repair-all have not been tested in the game yet.
-Their own output says so.
+set-liters, set-calories, set-rounds, repair-all and remove-item have not been tested in
+the game yet. Their own output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -36,8 +38,9 @@ original is a separate step that you do yourself, after a backup.
 Three checks stand between an edit and a written file:
     1. The original must pass the exact rebuild check (tld_save_codec.py verify).
     2. The edited save, decoded again, must differ from the original in exactly what was
-       asked for: one value, or for repair-all one condition for each repaired item.
-       Every other entry must be byte for byte unchanged.
+       asked for: one value, for repair-all one condition for each repaired item, and for
+       remove-item one inventory entry less. Every other entry must be byte for byte
+       unchanged.
     3. The file on disk is read back and compared with what was meant to be written.
 If a check fails, nothing is left on disk.
 
@@ -82,7 +85,7 @@ ROUNDS_HELD: Dict[str, int] = {
 }
 
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
-NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all"})
+NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item"})
 
 Difference = Tuple[str, str, str]
 
@@ -1020,6 +1023,126 @@ def repair_inventory(original: bytes) -> RepairEdit:
     return RepairEdit(edited, tuple(repaired), full, ruined, burned, unreadable, entries, unchanged)
 
 
+_SIGNED_WHOLE = re.compile(r"-?[0-9]+")
+
+# The game keeps the water you carry in two inventory entries, and every real save has both.
+_WATER_RECORD = "m_WaterSupplySerialized"
+
+
+@dataclass(frozen=True)
+class RemoveEdit:
+    data: bytes               # the edited save
+    prefab: str
+    entry: int                # the entry number the item had
+    count: Optional[int]      # units in the stack that went, or None when it was not a stack
+    condition: Optional[float]    # 0 to 100, or None when the save held no usable value
+    remaining: int            # inventory entries that are left
+    entries: int              # entries in the save
+    unchanged_entries: int    # entries that are byte for byte the original
+
+
+def _items_path() -> str:
+    return f"{codec.ENTRY_TABLE} > global > m_Inventory_Serialized > m_SerializedItems"
+
+
+def _mentions(value: JsonValue, number: int, path: str = "") -> Iterator[str]:
+    """Every place in a decoded value that holds this whole number, as a number or as text."""
+    if isinstance(value, NestedJson):
+        yield from _mentions(value.value, number, path)
+    elif isinstance(value, dict):
+        for key, inner in value.items():
+            yield from _mentions(inner, number, f"{path} > {key}" if path else key)
+    elif isinstance(value, list):
+        for position, inner in enumerate(value):
+            yield from _mentions(inner, number, f"{path}[{position}]")
+    elif isinstance(value, (Number, str)):
+        literal = value.literal if isinstance(value, Number) else value
+        if _SIGNED_WHOLE.fullmatch(literal) and int(literal) == number:
+            yield path
+
+
+def _why_it_stays(save: DecodedSave, entry: int, prefab: str) -> Optional[str]:
+    """The reason this tool does not remove an inventory entry, or None when it may go.
+
+    An item stays when the game needs it, when it is worn, and when the save holds its
+    instance number anywhere else, because that other place would then point at nothing.
+    """
+    items = _inventory_items(save)
+    gear = _gear_of(items[entry])
+    identity = gear.get("m_InstanceIDProxy") if gear is not None else None
+    if gear is None or not isinstance(identity, Number) or not _SIGNED_WHOLE.fullmatch(identity.literal):
+        return "its instance number is not stored the way this tool expects"
+    number = int(identity.literal)
+    if gear.get(_WATER_RECORD) is not None:
+        return "the game keeps the water you carry in this entry. Use set-liters to empty it"
+    clothing = gear.get("m_ClothingItemSerialized")
+    worn = clothing.value.get("m_WearingProxy") if isinstance(clothing, NestedJson) \
+        and isinstance(clothing.value, dict) else None
+    if worn is True:
+        return "you are wearing it in this save. Take it off in the game first"
+    if worn is not None and worn is not False:
+        return "whether you are wearing it is not stored the way this tool expects"
+    if abs(number) < 1000:
+        return f"its instance number, {number}, is too short to tell apart from other numbers in the save"
+    own = _gear_path(entry, "m_InstanceIDProxy")
+    elsewhere = next((place for place in _mentions(save.slot, number) if place != own), None)
+    if elsewhere is None:
+        return None
+    if elsewhere.endswith("> m_ItemInHandsInstanceID"):
+        return "it is in your hands in this save. Put it away in the game first"
+    if elsewhere.endswith("> m_LastUnequippedItemInstanceID"):
+        return ("it is the last item you held, and the save remembers it by its number. Hold another item in "
+                "the game and put that away first")
+    return f"the save holds its instance number in another place too: {elsewhere}"
+
+
+def _prove_removal(original: bytes, edited: bytes, entry: int) -> None:
+    """Decode both saves afresh and confirm that the edited inventory is the original one without one entry.
+
+    The comparison of two saves reports a list that changed its length as one difference and
+    does not look inside it. So every item that is left is compared here with the item it
+    must be.
+    """
+    before = _inventory_items(codec.decode_save(original))
+    after = _inventory_items(codec.decode_save(edited))
+    kept = before[:entry] + before[entry + 1:]
+    wrong = [position for position, (left, right) in enumerate(zip(kept, after))
+             if next(differences(left, right), None) is not None]
+    if len(after) != len(kept) or wrong:
+        detail = f"{len(after)} items where {len(kept)} were expected" if len(after) != len(kept) \
+            else f"the item now at entry {wrong[0]} is not the one that belongs there"
+        raise EditError("safety check failed: the inventory in the edited save is not the original one without "
+                        f"entry {entry}: {detail}")
+
+
+def remove_item(original: bytes, prefab: str, entry: Optional[int] = None) -> RemoveEdit:
+    """Return the save without one inventory entry. Reads and writes no file.
+
+    A stack goes as a whole. Raises EditError under the same rules as set_stack_count, and
+    when the entry is one this tool leaves in place: the water you carry, an item you are
+    wearing, and an item whose instance number the save holds in another place as well.
+    """
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    items = _inventory_items(save)
+    chosen, item = _select_item(items, prefab, entry)
+    reason = _why_it_stays(save, chosen, prefab)
+    if reason is not None:
+        raise EditError(f"inventory entry {chosen} ({prefab}) is not removed: {reason}")
+    stack = _stack_of(item)
+    condition = _condition_of(item)
+    before = len(items)
+    del items[chosen]
+    edited = codec.encode_save(save)
+    expected = (_items_path(), f"{before} items", f"{before - 1} items")
+    entries, unchanged = _prove_single_change(original, edited, expected)
+    _prove_removal(original, edited, chosen)
+    return RemoveEdit(edited, prefab, chosen, None if stack is None else stack[1], condition, before - 1,
+                      entries, unchanged)
+
+
 # ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
@@ -1251,6 +1374,38 @@ def _run_repair(path: Path, out: Path) -> int:
     return 0
 
 
+def _run_remove(path: Path, out: Path, prefab: str, entry: Optional[int]) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        check_new_file_path(out)
+        edit = remove_item(data, prefab, entry)
+        write_new_file(out, edit.data)
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 1
+    stack = "" if edit.count is None else f"a stack of {edit.count}, "
+    condition = "no condition" if edit.condition is None else f"condition {edit.condition:.1f}%"
+    left = "1 entry is" if edit.remaining == 1 else f"{edit.remaining} entries are"
+    print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
+    print(f"Item:     {edit.prefab}, inventory entry {edit.entry}")
+    print(f"Change:   removed ({stack}{condition}). {left} left in the inventory")
+    print(f"Note:     every entry number above {edit.entry} is now one lower. Run items again before the "
+          "next edit")
+    print("Checked:  the edited inventory is the original one without this entry, and nothing else differs")
+    print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
+          "(all except global)")
+    if "remove-item" in NOT_TESTED_IN_GAME:
+        print("Untested: no save changed by remove-item has been loaded in the game yet. Try it on a save "
+              "you can afford to lose")
+    print(f"Written:  {out}, {len(edit.data):,} bytes")
+    print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
+    print(f"{path.name} itself was not changed.")
+    return 0
+
+
 def _liters_argument(text: str) -> Decimal:
     try:
         return Decimal(text)
@@ -1271,6 +1426,7 @@ Examples:
   python tld_save_edit.py set-calories sandbox15 --item GEAR_MRE --calories 1750 --out sandbox15.edited
   python tld_save_edit.py set-rounds sandbox15 --item GEAR_Revolver --rounds 6 --out sandbox15.edited
   python tld_save_edit.py repair-all sandbox15 --out sandbox15.edited
+  python tld_save_edit.py remove-item sandbox15 --item GEAR_Stone --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -1355,6 +1511,16 @@ option was wrong.
                             help="the save file to read. It is not changed")
     repair_all.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                             help="the file to create. It must not exist yet")
+    remove = commands.add_parser("remove-item", help="take one item or one whole stack out of the inventory "
+                                                     "(not tested in the game yet)")
+    remove.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
+    remove.add_argument("--item", required=True, metavar="GEAR_NAME",
+                        help="the item, as items prints it, for example GEAR_Stone")
+    remove.add_argument("--entry", type=int, metavar="N",
+                        help="the entry number from items. Needed when the inventory holds more than one "
+                             "of the item")
+    remove.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                        help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command in ("items", "stacks"):
         return _run_list(args.save, stacks_only=args.command == "stacks")
@@ -1366,6 +1532,8 @@ option was wrong.
         return _run_weapons(args.save)
     if args.command == "repair-all":
         return _run_repair(args.save, args.out)
+    if args.command == "remove-item":
+        return _run_remove(args.save, args.out, args.item, args.entry)
     value: Union[float, Decimal]
     if args.command == "set-count":
         value = args.count

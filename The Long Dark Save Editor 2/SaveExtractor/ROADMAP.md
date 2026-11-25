@@ -35,7 +35,7 @@ change finishes or advances an item, update this file in the same pull request.
 | Rounds in a weapon | Built (pull request 11). Not tested in game |
 | Film in the camera | Asked for by the owner on 2026-11-24. The camera uses the weapon record, and no save at hand has a loaded camera. Waiting for one |
 | Repair everything in the inventory | Built (pull request 12). Not tested in game. Torches and flares that have burned are left alone |
-| Remove an item | Not started |
+| Remove an item | Built (pull request 13). Not tested in game |
 | Add an item | Not started |
 
 ## What holds for every block
