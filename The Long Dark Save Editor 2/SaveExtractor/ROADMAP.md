@@ -13,7 +13,7 @@ change finishes or advances an item, update this file in the same pull request.
 | F | Foundations: the tests run on GitHub, the wiki helper has tests, the folder has one decompressor, and coding agents have a context file | Done (pull requests 1 to 4) |
 | R | Reader depth: more of what a save holds, read correctly | Built (pull requests 5, 6 and 8). Open: the owner compares a few weights, liters and calories with the game's inventory screen |
 | I | Inventory edits: add an item, remove an item, repair everything, liters, calories, rounds | Built (pull requests 9 to 15), except for adding an item the inventory does not hold and film in the camera. Not tested in game. Open: the owner's session in the game, from the checklist in the block report |
-| P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | Not started |
+| P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | In progress |
 | Trader | The Trader: read his state (trust, contacts, offers, special requests), a report command, and one edit (trust) | Not started. The owner has not yet confirmed the place in the order or the edit |
 | T | Live tracker: where animals, corpses, Tale objects and one-of-a-kind items are as of the last game save, then a watcher that follows new saves | Not started |
 | U | Front end: a standalone desktop client that follows the design of the C# editor | Not started |
@@ -38,6 +38,16 @@ change finishes or advances an item, update this file in the same pull request.
 | Remove an item | Built (pull request 13). Not tested in game |
 | Add an item | First step built (pull request 14): `copy-item` adds another one of an item the inventory holds. Not tested in game. An item the inventory does not hold is not started: it needs a record built for each kind of item, and it waits for the in-game results |
 | Several edits put in place at once | Built (pull request 15): `apply` lists the inventory entries that an edited file adds or takes away, and every other value under its entry number in the live save. Before that, a file with an entry more or less was shown as one changed value, or as hundreds |
+
+## Block P in detail
+
+| Item | State |
+|---|---|
+| Condition, calories, and the bars for thirst, fatigue and cold | Built (pull request 16) for a value the save holds: `player` lists the five, `set-player` changes them. Not tested in game |
+| A value the game left out of the save | Not started. The game leaves a number out when it is 0, and `set-player` refuses it for now. Setting it adds a field, which needs a check of its own |
+| Skills | Not started. The save holds points for nine skills, and no level |
+| Cure afflictions | Not started. Active in the 14 saves at hand: hypothermia, a burn, sprained wrists and sprain pain |
+| Position | Not started. Inside the current scene only |
 
 ## What holds for every block
 

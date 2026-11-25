@@ -8,6 +8,7 @@ Usage:
     python tld_save_edit.py liquids SAVE
     python tld_save_edit.py foods SAVE
     python tld_save_edit.py weapons SAVE
+    python tld_save_edit.py player SAVE
     python tld_save_edit.py set-count SAVE --item GEAR_NAME --count N --out NEW_FILE [--entry N]
     python tld_save_edit.py set-condition SAVE --item GEAR_NAME --condition PERCENT --out NEW_FILE [--entry N]
     python tld_save_edit.py set-liters SAVE --item GEAR_NAME --liters LITERS --out NEW_FILE [--entry N]
@@ -16,6 +17,9 @@ Usage:
     python tld_save_edit.py repair-all SAVE --out NEW_FILE
     python tld_save_edit.py remove-item SAVE --item GEAR_NAME --out NEW_FILE [--entry N]
     python tld_save_edit.py copy-item SAVE --item GEAR_NAME --out NEW_FILE [--entry N]
+    python tld_save_edit.py set-player SAVE [--condition PERCENT] [--calories CALORIES]
+                                            [--hydration PERCENT] [--rest PERCENT] [--warmth PERCENT]
+                                            --out NEW_FILE
 
 items lists everything in the player's inventory: entry number, item, count, condition.
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
@@ -29,8 +33,13 @@ condition of every item in the inventory to 100%, except ruined items and torche
 flares that have burned. remove-item takes one item, or one whole stack, out of the
 inventory. copy-item adds another one of an item the inventory holds.
 
-set-liters, set-calories, set-rounds, repair-all, remove-item and copy-item have not been
-tested in the game yet. Their own output says so.
+player lists the player's own values: condition, calories, and the three bars for thirst,
+fatigue and cold. set-player changes one or more of them. It takes every number the way
+the game shows it, so 100 is a full bar: --hydration 100 is not thirsty at all, --rest 100
+is fully rested, and --warmth 100 is warm.
+
+set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item and set-player have
+not been tested in the game yet. Their own output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -40,8 +49,8 @@ Three checks stand between an edit and a written file:
     1. The original must pass the exact rebuild check (tld_save_codec.py verify).
     2. The edited save, decoded again, must differ from the original in exactly what was
        asked for: one value, for repair-all one condition for each repaired item, for
-       remove-item one inventory entry less, and for copy-item one more. Every other
-       entry must be byte for byte unchanged.
+       remove-item one inventory entry less, for copy-item one more, and for set-player
+       one value for each option. Every other entry must be byte for byte unchanged.
     3. The file on disk is read back and compared with what was meant to be written.
 If a check fails, nothing is left on disk.
 
@@ -88,7 +97,7 @@ ROUNDS_HELD: Dict[str, int] = {
 
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
 NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item",
-                                "copy-item"})
+                                "copy-item", "set-player"})
 
 Difference = Tuple[str, str, str]
 
@@ -1390,6 +1399,163 @@ def compare_saves(before: DecodedSave, after: DecodedSave) -> SaveComparison:
 
 
 # ---------------------------------------------------------------------------
+# The player's own values: condition, calories, and the bars for thirst, fatigue and cold
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _PlayerField:
+    record: str    # the field of the global entry that holds the record
+    field: str     # the number inside that record
+    bar: bool      # the save holds the inverse of the bar: 0 for a full one, 100 for an empty one
+    low: float     # the lowest and the highest number this tool takes, the way the game shows it
+    high: float
+
+
+# Each value is named for its good end, so that 100 is the best number for every one of them.
+# The save holds thirst, fatigue and cold the other way round. In one real save all three had
+# been set to 100 with another editor, which is dehydrated, exhausted and freezing.
+PLAYER_VALUES: Dict[str, _PlayerField] = {
+    "condition": _PlayerField("m_Condition_Serialized", "m_CurrentHPProxy", False, 1.0, 100.0),
+    "calories": _PlayerField("m_Hunger_Serialized", "m_CurrentReserveCaloriesProxy", False, 0.0, 2500.0),
+    "hydration": _PlayerField("m_Thirst_Serialized", "m_CurrentThirstProxy", True, 0.0, 100.0),
+    "rest": _PlayerField("m_Fatigue_Serialized", "m_CurrentFatigueProxy", True, 0.0, 100.0),
+    "warmth": _PlayerField("m_Freezing_Serialized", "m_CurrentFreezingProxy", True, 0.0, 100.0),
+}
+
+
+@dataclass(frozen=True)
+class PlayerValue:
+    """One of the player's own values.
+
+    stored and shown are both there for a value the save holds. With stored missing, the game
+    left the number out, which it does for 0. With shown missing, the value cannot be read.
+    """
+    name: str                   # condition, calories, hydration, rest or warmth
+    field: str                  # the number in the save that holds it, for example m_CurrentThirstProxy
+    stored: Optional[str]       # that number as the save holds it
+    shown: Optional[Decimal]    # the value the way the game shows it: percent, or calories
+
+
+def _player_record(save: DecodedSave, name: str) -> Optional[Dict[str, JsonValue]]:
+    """The record that holds one of the player's values. None when it is not stored as expected."""
+    document = save.entries.get("global")
+    record = document.get(PLAYER_VALUES[name].record) if isinstance(document, dict) else None
+    content = record.value if isinstance(record, NestedJson) else None
+    return content if isinstance(content, dict) else None
+
+
+def _shown(name: str, stored: Decimal) -> Decimal:
+    """A stored number the way the game shows it."""
+    return 100 - stored if PLAYER_VALUES[name].bar else stored
+
+
+def _player_text(name: str, shown: Decimal) -> str:
+    """One of the player's values the way the game shows it, for example 78.2% of the bar."""
+    if name == "calories":
+        return f"{shown:.1f}"
+    return f"{shown:.1f}%" + (" of the bar" if PLAYER_VALUES[name].bar else "")
+
+
+def read_player(save: DecodedSave) -> List[PlayerValue]:
+    """The player's condition, calories, hydration, rest and warmth.
+
+    The game leaves a number out of the save when it is 0. So a number that is missing from a
+    record that can be read counts as 0: no calories, or a full bar.
+    """
+    values: List[PlayerValue] = []
+    for name, where in PLAYER_VALUES.items():
+        record = _player_record(save, name)
+        if record is None:
+            values.append(PlayerValue(name, where.field, None, None))
+        elif where.field not in record:
+            values.append(PlayerValue(name, where.field, None, _shown(name, Decimal(0))))
+        else:
+            held = record[where.field]
+            number = _finite(held)
+            literal = held.literal if isinstance(held, Number) else None
+            values.append(PlayerValue(name, where.field, literal,
+                                      None if number is None else _shown(name, number)))
+    return values
+
+
+@dataclass(frozen=True)
+class PlayerEdit:
+    data: bytes                                  # the edited save
+    changes: Tuple[Tuple[str, str, str], ...]    # (name, the number stored before, the number stored now)
+    entries: int                                 # entries in the save
+    unchanged_entries: int                       # entries that are byte for byte the original
+
+
+def _player_path(name: str) -> str:
+    where = PLAYER_VALUES[name]
+    return f"{codec.ENTRY_TABLE} > global > {where.record} > {where.field}"
+
+
+def stored_player_value(name: str, value: float) -> str:
+    """The number the save holds for one of the player's values, given the way the game shows it."""
+    where = PLAYER_VALUES[name]
+    if not where.low <= value <= where.high:
+        raise EditError(f"{name} must be a number from {where.low:g} to {where.high:g}, not {value:g}")
+    given = Decimal(repr(value))
+    stored = 100 - given if where.bar else given
+    if 0 < stored < Decimal("0.0001"):
+        nearest = where.high if where.bar else 0.0
+        raise EditError(f"{name} {value!r} is too close to {nearest:g} for this tool to write. Use {nearest:g}")
+    return float32_literal(float(stored))
+
+
+def set_player_values(original: bytes, values: Dict[str, float]) -> PlayerEdit:
+    """Return the save with one or more of the player's own values changed. Reads and writes no file.
+
+    values maps condition, calories, hydration, rest and warmth to the new number, the way the
+    game shows it: percent, or calories. Raises EditError for a name or a number outside of
+    that, for a value the save does not hold as a plain number, and for a value that is what
+    the save holds already.
+    """
+    unknown = [name for name in values if name not in PLAYER_VALUES]
+    if unknown or not values:
+        raise EditError("name one or more of " + ", ".join(PLAYER_VALUES)
+                        + (f", not {', '.join(unknown)}" if unknown else ""))
+    wanted = {name: stored_player_value(name, value) for name, value in values.items()}
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    document = save.entries.get("global")
+    order = list(document) if isinstance(document, dict) else []
+
+    def place(name: str) -> int:
+        """Where the record of a value stands in the save. The proof wants the changes in that order."""
+        record = PLAYER_VALUES[name].record
+        return order.index(record) if record in order else len(order)
+
+    changes: List[Tuple[str, str, str]] = []
+    for name in sorted(wanted, key=place):
+        where = PLAYER_VALUES[name]
+        record = _player_record(save, name)
+        if record is None:
+            raise EditError(f"{name} is not stored the way this tool expects ({where.record}), so it is not "
+                            "changed")
+        if where.field not in record:
+            raise EditError(f"this save holds no number for {name}. The game leaves {where.field} out when it "
+                            "is 0, and setting it would add a field to the save. This tool does not do that "
+                            "yet")
+        old = record[where.field]
+        number = _finite(old)
+        if number is None or not isinstance(old, Number):
+            raise EditError(f"{name} is not stored as a number ({where.field}), so it is not changed")
+        new = wanted[name]
+        if number == Decimal(new):
+            raise EditError(f"{name} is already {_player_text(name, _shown(name, number))}. Nothing to change")
+        record[where.field] = Number(new)
+        changes.append((name, old.literal, new))
+    edited = codec.encode_save(save)
+    entries, unchanged = _prove_changes(original, edited,
+                                        [(_player_path(name), old, new) for name, old, new in changes])
+    return PlayerEdit(edited, tuple(changes), entries, unchanged)
+
+
+# ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
 
@@ -1535,6 +1701,66 @@ def _run_weapons(path: Path) -> int:
         print(f"{row.entry:>5}  {row.prefab:<{width}}  {row.rounds:>6}  {row.spent:>13}  {holds:>5}".rstrip())
     print(f"{_count_text(len(listed), 'item')} that can hold rounds among "
           f"{_count_text(total, 'inventory item')} in {path.name}.")
+    return 0
+
+
+def _run_player(path: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        values = read_player(codec.decode_save(data))
+    except codec.SaveFormatError as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        return 1
+    rows: List[Tuple[str, str, str]] = []
+    for value in values:
+        if value.shown is None:
+            rows.append((value.name, "cannot be read",
+                         f"{value.field} is not stored the way this tool expects"))
+        elif value.stored is None:
+            rows.append((value.name, _player_text(value.name, value.shown),
+                         f"{value.field} is left out, which means 0"))
+        else:
+            rows.append((value.name, _player_text(value.name, value.shown), f"{value.field} {value.stored}"))
+    width = max([len(shown) for _, shown, _ in rows] + [11])
+    print(f"{'value':<9}  {'in the game':<{width}}  in the save")
+    for name, shown, stored in rows:
+        print(f"{name:<9}  {shown:<{width}}  {stored}")
+    print(f"The player's {len(rows)} values in {path.name}.")
+    print("For hydration, rest and warmth the save holds the inverse of the bar: 0 is a full bar, and 100 an "
+          "empty one.")
+    return 0
+
+
+def _run_player_edit(path: Path, out: Path, values: Dict[str, float]) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        check_new_file_path(out)
+        edit = set_player_values(data, values)
+        write_new_file(out, edit.data)
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        print("Nothing was written.", file=sys.stderr)
+        return 1
+    count = len(edit.changes)
+    print(f"Save:     {path.name}, {len(data):,} bytes, passes the exact rebuild check")
+    for name, old, new in edit.changes:
+        before, after = (_player_text(name, _shown(name, Decimal(stored))) for stored in (old, new))
+        print(f"Change:   {name} {before} -> {after} "
+              f"(stored as {PLAYER_VALUES[name].field} {old} -> {new})")
+    print("Checked:  the edited save differs from the original in exactly "
+          + ("this one value" if count == 1 else f"these {count} values"))
+    print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
+          "(all except global)")
+    if "set-player" in NOT_TESTED_IN_GAME:
+        print("Untested: no save changed by set-player has been loaded in the game yet. Try it on a save "
+              "you can afford to lose")
+    print(f"Written:  {out}, {len(edit.data):,} bytes")
+    print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
+    print(f"{path.name} itself was not changed.")
     return 0
 
 
@@ -1703,6 +1929,8 @@ Examples:
   python tld_save_edit.py repair-all sandbox15 --out sandbox15.edited
   python tld_save_edit.py remove-item sandbox15 --item GEAR_Stone --out sandbox15.edited
   python tld_save_edit.py copy-item sandbox15 --item GEAR_MRE --out sandbox15.edited
+  python tld_save_edit.py player sandbox15
+  python tld_save_edit.py set-player sandbox15 --condition 100 --hydration 100 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -1713,7 +1941,8 @@ option was wrong.
                        ("stacks", "list the stacks in the player's inventory"),
                        ("liquids", "list the inventory items that hold liquid"),
                        ("foods", "list the inventory items with calories"),
-                       ("weapons", "list the inventory items that can hold rounds")):
+                       ("weapons", "list the inventory items that can hold rounds"),
+                       ("player", "list the player's condition, calories, hydration, rest and warmth")):
         listing = commands.add_parser(name, help=text)
         listing.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
     set_count = commands.add_parser("set-count", help="change the count of one inventory stack")
@@ -1807,7 +2036,29 @@ option was wrong.
                                 "one of the item")
     duplicate.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                            help="the file to create. It must not exist yet")
+    set_player = commands.add_parser("set-player", help="change the player's condition, calories, hydration, "
+                                                        "rest or warmth (not tested in the game yet)")
+    set_player.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
+    for name, meaning, best in (("condition", "the player's condition in percent", ""),
+                                ("calories", "the calories the player has in store", ""),
+                                ("hydration", "the thirst bar in percent of a full bar", "not thirsty at all"),
+                                ("rest", "the fatigue bar in percent of a full bar", "fully rested"),
+                                ("warmth", "the cold bar in percent of a full bar", "warm")):
+        limits = PLAYER_VALUES[name]
+        unit = "CALORIES" if name == "calories" else "PERCENT"
+        set_player.add_argument(f"--{name}", type=float, metavar=unit,
+                                help=f"{meaning}, from {limits.low:g} to {limits.high:g}"
+                                     + (f". {limits.high:g} is {best}" if best else ""))
+    set_player.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                            help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
+    if args.command == "player":
+        return _run_player(args.save)
+    if args.command == "set-player":
+        chosen = {name: getattr(args, name) for name in PLAYER_VALUES if getattr(args, name) is not None}
+        if not chosen:
+            parser.error("set-player needs one or more of " + ", ".join(f"--{name}" for name in PLAYER_VALUES))
+        return _run_player_edit(args.save, args.out, chosen)
     if args.command in ("items", "stacks"):
         return _run_list(args.save, stacks_only=args.command == "stacks")
     if args.command == "liquids":

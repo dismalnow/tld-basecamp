@@ -28,7 +28,7 @@ from unittest import mock
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import EditError, Food, Item, Liquid, Stack, Weapon
+from tld_save_edit import EditError, Food, Item, Liquid, PlayerValue, Stack, Weapon
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -2019,6 +2019,257 @@ class CompareSavesTests(unittest.TestCase):
         self.assertEqual(codec.encode_save(after), carried_save(without(CARRIED, 1)))
 
 
+# The player's own values: (the record in the global entry, the number inside that record).
+PLAYER_FIELDS: Dict[str, Tuple[str, str]] = {
+    "condition": ("m_Condition_Serialized", "m_CurrentHPProxy"),
+    "calories": ("m_Hunger_Serialized", "m_CurrentReserveCaloriesProxy"),
+    "hydration": ("m_Thirst_Serialized", "m_CurrentThirstProxy"),
+    "rest": ("m_Fatigue_Serialized", "m_CurrentFatigueProxy"),
+    "warmth": ("m_Freezing_Serialized", "m_CurrentFreezingProxy"),
+}
+# What the save holds for each of them. None: the game left the number out, as it does for 0.
+PLAYER_STORED: Dict[str, Optional[str]] = {"condition": "76.66127", "calories": "1386.98242",
+                                           "hydration": "21.7523441", "rest": "9.5124445", "warmth": None}
+
+
+def player_save(stored: Optional[Dict[str, JsonValue]] = None,
+                records: Optional[Dict[str, JsonValue]] = None) -> bytes:
+    """A save with the five records of the player's own values, the way the game writes them.
+
+    stored gives what a record holds for a value, by the name of the value: text for a number,
+    None to leave the number out, or any other value to put in its place. records puts another
+    value where a whole record belongs, by the name of the record.
+    """
+    held: Dict[str, JsonValue] = dict(PLAYER_STORED)
+    held.update(stored or {})
+    document: Dict[str, JsonValue] = {}
+    for name, (record, field) in PLAYER_FIELDS.items():
+        content: Dict[str, JsonValue] = {}
+        if held[name] is not None:
+            content[field] = Number(held[name]) if isinstance(held[name], str) else held[name]
+        content["m_NumSecondsSinceLastVoiceOver"] = Number("Infinity")
+        if name == "hydration":
+            content["m_ThirstLevelForPreviousVoiceOver"] = "SlightlyThirsty"
+        document[record] = NestedJson(content)
+        if name == "condition":
+            document["m_Encumber_Serialized"] = NestedJson(
+                {"m_NumSecondsSinceLastVoiceOver": Number("147.943771")})
+    document.update(records or {})
+    document["m_Inventory_Serialized"] = NestedJson(
+        {"m_SerializedItems": [item(*spec) for spec in DEFAULT_ITEMS], "m_QuickSelectInstanceIDs": []})
+    return build_save(global_document=document)
+
+
+def player_path(name: str) -> str:
+    record, field = PLAYER_FIELDS[name]
+    return f"m_Dict > global > {record} > {field}"
+
+
+class PlayerListTests(unittest.TestCase):
+    def read(self, save: bytes) -> List[PlayerValue]:
+        return edit.read_player(codec.decode_save(save))
+
+    def test_the_five_values_are_read_the_way_the_game_shows_them(self) -> None:
+        self.assertEqual(self.read(player_save()), [
+            PlayerValue("condition", "m_CurrentHPProxy", "76.66127", Decimal("76.66127")),
+            PlayerValue("calories", "m_CurrentReserveCaloriesProxy", "1386.98242", Decimal("1386.98242")),
+            # The save holds the inverse of the three bars: 0 is a full bar.
+            PlayerValue("hydration", "m_CurrentThirstProxy", "21.7523441", Decimal("78.2476559")),
+            PlayerValue("rest", "m_CurrentFatigueProxy", "9.5124445", Decimal("90.4875555")),
+            PlayerValue("warmth", "m_CurrentFreezingProxy", None, Decimal("100")),
+        ])
+
+    def test_a_number_the_game_left_out_counts_as_zero(self) -> None:
+        values = self.read(player_save(dict.fromkeys(PLAYER_FIELDS)))
+        self.assertEqual([(value.name, value.stored, value.shown) for value in values],
+                         [("condition", None, Decimal(0)), ("calories", None, Decimal(0)),
+                          ("hydration", None, Decimal(100)), ("rest", None, Decimal(100)),
+                          ("warmth", None, Decimal(100))])
+
+    def test_the_ends_of_the_bars(self) -> None:
+        values = self.read(player_save({"hydration": "100.0", "rest": "0.0", "warmth": "12.5"}))
+        self.assertEqual([(value.name, value.stored, value.shown) for value in values[2:]],
+                         [("hydration", "100.0", Decimal("0.0")), ("rest", "0.0", Decimal("100.0")),
+                          ("warmth", "12.5", Decimal("87.5"))])
+
+    def test_values_that_cannot_be_read_are_marked(self) -> None:
+        thirst = "m_Thirst_Serialized"
+        cases = {
+            "no record": (player_save(records={thirst: None}), None),
+            "a record that is no nested document": (player_save(records={thirst: {"m_CurrentThirstProxy":
+                                                                                  Number("21.75")}}), None),
+            "a nested document that is no record": (player_save(records={thirst: NestedJson([])}), None),
+            "a number that is not finite": (player_save({"hydration": "Infinity"}), "Infinity"),
+            "no number at all": (player_save({"hydration": Number("NaN")}), "NaN"),
+            "text": (player_save(records={thirst: NestedJson({"m_CurrentThirstProxy": "21.75"})}), None),
+            "true": (player_save({"hydration": True}), None),
+        }
+        for name, (save, stored) in cases.items():
+            with self.subTest(name):
+                values = self.read(save)
+                self.assertEqual(values[2], PlayerValue("hydration", "m_CurrentThirstProxy", stored, None))
+                # The other four are read as before.
+                self.assertEqual([value.shown is not None for value in values], [True, True, False, True, True])
+
+
+class SetPlayerTests(unittest.TestCase):
+    def refusal(self, values: Dict[str, float], save: Optional[bytes] = None) -> str:
+        with self.assertRaises(EditError) as refused:
+            edit.set_player_values(player_save() if save is None else save, values)
+        return str(refused.exception)
+
+    def test_changes_exactly_one_value(self) -> None:
+        original = player_save()
+        result = edit.set_player_values(original, {"condition": 100})
+        self.assertEqual(result.changes, (("condition", "76.66127", "100.0"),))
+        # Built independently, with that one number.
+        self.assertEqual(result.data, player_save({"condition": "100.0"}))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(player_path("condition"), "76.66127", "100.0")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_the_bars_are_written_as_their_inverse(self) -> None:
+        with_cold = player_save({"warmth": "82.56313"})
+        for name, given, stored, save in (("hydration", 80, "20.0", player_save()),
+                                          ("hydration", 0, "100.0", player_save()),
+                                          ("rest", 100, "0.0", player_save()),
+                                          ("rest", 12.5, "87.5", player_save()),
+                                          ("warmth", 25, "75.0", with_cold)):
+            with self.subTest(name=name, given=given):
+                result = edit.set_player_values(save, {name: given})
+                self.assertEqual(result.changes, ((name, edit._player_record(
+                    codec.decode_save(save), name)[PLAYER_FIELDS[name][1]].literal, stored),))
+                expected = {name: stored} if save is not with_cold else {"warmth": stored}
+                self.assertEqual(result.data, player_save(expected))
+
+    def test_condition_and_calories_are_written_as_given(self) -> None:
+        result = edit.set_player_values(player_save(), {"calories": 2500, "condition": 1})
+        self.assertEqual(result.changes, (("condition", "76.66127", "1.0"),
+                                          ("calories", "1386.98242", "2500.0")))
+        self.assertEqual(result.data, player_save({"condition": "1.0", "calories": "2500.0"}))
+        emptied = edit.set_player_values(player_save(), {"calories": 0})
+        self.assertEqual(emptied.data, player_save({"calories": "0.0"}))
+
+    def test_several_values_change_in_one_edit_in_the_order_of_the_save(self) -> None:
+        original = player_save()
+        result = edit.set_player_values(original, {"rest": 50, "hydration": 100, "condition": 90.5})
+        self.assertEqual(result.changes, (("condition", "76.66127", "90.5"), ("hydration", "21.7523441", "0.0"),
+                                          ("rest", "9.5124445", "50.0")))
+        self.assertEqual(result.data, player_save({"condition": "90.5", "hydration": "0.0", "rest": "50.0"}))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(player_path("condition"), "76.66127", "90.5"),
+                                 (player_path("hydration"), "21.7523441", "0.0"),
+                                 (player_path("rest"), "9.5124445", "50.0")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+
+    def test_numbers_are_written_the_way_the_game_writes_a_32_bit_float(self) -> None:
+        # 1234.56789 is not a 32-bit float. The nearest one is written, with the digits it needs.
+        self.assertEqual(edit.stored_player_value("calories", 1234.56789), "1234.56787")
+        self.assertEqual(edit.stored_player_value("hydration", 33.3), "66.7")
+        self.assertEqual(edit.stored_player_value("condition", 100), "100.0")
+        self.assertEqual(edit.stored_player_value("warmth", 100), "0.0")
+        result = edit.set_player_values(player_save(), {"calories": 1234.56789})
+        self.assertEqual(result.data, player_save({"calories": "1234.56787"}))
+
+    def test_numbers_outside_the_limits_are_refused(self) -> None:
+        for name, low, high in (("condition", 1, 100), ("calories", 0, 2500), ("hydration", 0, 100),
+                                ("rest", 0, 100), ("warmth", 0, 100)):
+            for given in (low - 0.5, high + 0.5, float("nan"), float("inf"), float("-inf")):
+                with self.subTest(name=name, given=given):
+                    self.assertIn(f"{name} must be a number from {low} to {high}, not {given:g}",
+                                  self.refusal({name: given}))
+            for given in (low, high):
+                with self.subTest(name=name, given=given):
+                    self.assertIsInstance(edit.stored_player_value(name, given), str)
+
+    def test_a_number_too_close_to_an_end_to_write_is_refused(self) -> None:
+        self.assertIn("hydration 99.99999 is too close to 100 for this tool to write. Use 100",
+                      self.refusal({"hydration": 99.99999}))
+        self.assertIn("calories 1e-05 is too close to 0 for this tool to write. Use 0",
+                      self.refusal({"calories": 0.00001}))
+        self.assertEqual(edit.stored_player_value("hydration", 99.9999), "0.0001")
+        self.assertEqual(edit.stored_player_value("calories", 0.0001), "0.0001")
+
+    def test_a_value_the_save_holds_already_is_refused(self) -> None:
+        self.assertIn("condition is already 76.7%. Nothing to change", self.refusal({"condition": 76.66127}))
+        self.assertIn("hydration is already 78.2% of the bar. Nothing to change",
+                      self.refusal({"hydration": 78.2476559}))
+        self.assertIn("calories is already 1387.0. Nothing to change", self.refusal({"calories": 1386.98242}))
+        # The same number written another way is the same number.
+        self.assertIn("rest is already 100.0% of the bar",
+                      self.refusal({"rest": 100}, player_save({"rest": "0"})))
+
+    def test_a_number_the_game_left_out_is_not_put_back(self) -> None:
+        message = self.refusal({"warmth": 50})
+        self.assertIn("this save holds no number for warmth. The game leaves m_CurrentFreezingProxy out when "
+                      "it is 0, and setting it would add a field to the save", message)
+
+    def test_values_that_cannot_be_read_are_refused(self) -> None:
+        thirst = "m_Thirst_Serialized"
+        record = f"hydration is not stored the way this tool expects ({thirst}), so it is not changed"
+        number = "hydration is not stored as a number (m_CurrentThirstProxy), so it is not changed"
+        cases = {
+            "no record": (player_save(records={thirst: None}), record),
+            "a record that is no nested document": (player_save(records={thirst: {}}), record),
+            "a number that is not finite": (player_save({"hydration": "Infinity"}), number),
+            "text": (player_save(records={thirst: NestedJson({"m_CurrentThirstProxy": "21.75"})}), number),
+            "true": (player_save({"hydration": True}), number),
+        }
+        for name, (save, message) in cases.items():
+            with self.subTest(name):
+                self.assertIn(message, self.refusal({"hydration": 50}, save))
+
+    def test_names_that_are_no_values_are_refused(self) -> None:
+        names = "condition, calories, hydration, rest, warmth"
+        self.assertEqual(self.refusal({"mood": 50, "rest": 50}), f"name one or more of {names}, not mood")
+        self.assertEqual(self.refusal({}), f"name one or more of {names}")
+
+    def test_one_refused_value_stops_the_whole_edit(self) -> None:
+        original = player_save()
+        kept = bytes(original)
+        # The first value could be changed. The second one cannot, and no save comes back.
+        for values in ({"condition": 100, "warmth": 50}, {"condition": 100, "rest": 100.5},
+                       {"condition": 100, "rest": 90.4875555}):
+            with self.subTest(values=values):
+                with self.assertRaises(EditError):
+                    edit.set_player_values(original, values)
+        self.assertEqual(original, kept)
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = player_save()
+        kept = bytes(original)
+        edit.set_player_values(original, {"condition": 100, "rest": 100})
+        self.assertEqual(original, kept)
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_player_values(b"not a save", {"condition": 100})
+        self.assertIn("does not pass the exact rebuild check", str(refused.exception))
+
+    def caught(self, wrong: bytes) -> str:
+        """What the tool says when the encoder hands back wrong in place of the save with two values changed."""
+        with encoding_as(player_save({"condition": "100.0", "rest": "0.0"}), wrong):
+            with self.assertRaises(EditError) as refused:
+                edit.set_player_values(player_save(), {"condition": 100, "rest": 100})
+        return str(refused.exception)
+
+    def test_a_value_that_was_not_written_is_caught(self) -> None:
+        message = self.caught(player_save({"condition": "100.0"}))
+        self.assertIn("did not change exactly the 2 values asked for", message)
+        self.assertIn("1 asked for and not made", message)
+        self.assertIn("m_CurrentFatigueProxy: 9.5124445 -> 0.0", message)
+
+    def test_a_value_written_wrongly_is_caught(self) -> None:
+        message = self.caught(player_save({"condition": "100.0", "rest": "100.0"}))
+        self.assertIn("m_CurrentFatigueProxy: 9.5124445 -> 100.0", message)
+
+    def test_a_change_that_was_not_asked_for_is_caught(self) -> None:
+        message = self.caught(player_save({"condition": "100.0", "rest": "0.0", "hydration": "0.0"}))
+        self.assertIn("1 not asked for", message)
+        self.assertIn("m_CurrentThirstProxy: 21.7523441 -> 0.0", message)
+
+
 class NewFileTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -2324,7 +2575,8 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
         self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds",
-                                                             "repair-all", "remove-item", "copy-item"}))
+                                                             "repair-all", "remove-item", "copy-item",
+                                                             "set-player"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -2782,8 +3034,142 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertIn("Not found", err)
 
+    def test_player_lists_the_five_values(self) -> None:
+        self.save.write_bytes(player_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("player", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines(), [
+            "value      in the game        in the save",
+            "condition  76.7%              m_CurrentHPProxy 76.66127",
+            "calories   1387.0             m_CurrentReserveCaloriesProxy 1386.98242",
+            "hydration  78.2% of the bar   m_CurrentThirstProxy 21.7523441",
+            "rest       90.5% of the bar   m_CurrentFatigueProxy 9.5124445",
+            "warmth     100.0% of the bar  m_CurrentFreezingProxy is left out, which means 0",
+            "The player's 5 values in sandbox15.",
+            "For hydration, rest and warmth the save holds the inverse of the bar: 0 is a full bar, and 100 an "
+            "empty one.",
+        ])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_player_marks_a_value_it_cannot_read(self) -> None:
+        self.save.write_bytes(player_save(records={"m_Thirst_Serialized": None}))
+        code, out, err = self.run_command("player", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[3], "hydration  cannot be read     m_CurrentThirstProxy is not "
+                                              "stored the way this tool expects")
+
+    def test_player_on_something_that_is_no_save(self) -> None:
+        self.save.write_bytes(b"not a save")
+        code, out, err = self.run_command("player", str(self.save))
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Refused:", err)
+        code, out, err = self.run_command("player", str(self.folder / "sandbox99"))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
+    def test_set_player_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(player_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("set-player", str(self.save), "--rest", "100", "--condition", "100",
+                                          "--calories", "2500", "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(),
+                         player_save({"condition": "100.0", "calories": "2500.0", "rest": "0.0"}))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], f"Save:     sandbox15, {len(player_save()):,} bytes, passes the exact "
+                                   "rebuild check")
+        self.assertEqual(lines[1:6], [
+            "Change:   condition 76.7% -> 100.0% (stored as m_CurrentHPProxy 76.66127 -> 100.0)",
+            "Change:   calories 1387.0 -> 2500.0 (stored as m_CurrentReserveCaloriesProxy 1386.98242 -> "
+            "2500.0)",
+            "Change:   rest 90.5% of the bar -> 100.0% of the bar (stored as m_CurrentFatigueProxy 9.5124445 "
+            "-> 0.0)",
+            "Checked:  the edited save differs from the original in exactly these 3 values",
+            "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
+        ])
+        self.assertEqual(lines[6], "Untested: no save changed by set-player has been loaded in the game yet. "
+                                   "Try it on a save you can afford to lose")
+        self.assertEqual(lines[7], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[8], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[9:], ["sandbox15 itself was not changed."])
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_set_player_takes_each_value_by_its_own_option(self) -> None:
+        held = player_save({"warmth": "82.56313"})
+        for option, given, name, stored in (("--condition", "55.5", "condition", "55.5"),
+                                            ("--calories", "2000", "calories", "2000.0"),
+                                            ("--hydration", "100", "hydration", "0.0"),
+                                            ("--rest", "25", "rest", "75.0"),
+                                            ("--warmth", "90", "warmth", "10.0"),
+                                            # 0 is a number like any other, and not a value left out.
+                                            ("--calories", "0", "calories", "0.0"),
+                                            ("--hydration", "0", "hydration", "100.0")):
+            with self.subTest(option=option):
+                self.save.write_bytes(held)
+                out_file = self.folder / f"sandbox15.{name}{given}"
+                code, out, err = self.run_command("set-player", str(self.save), option, given,
+                                                  "--out", str(out_file))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(out_file.read_bytes(), player_save({"warmth": "82.56313", name: stored}))
+                self.assertIn("Checked:  the edited save differs from the original in exactly this one value\n",
+                              out)
+
+    def test_set_player_refusals_write_nothing(self) -> None:
+        self.save.write_bytes(player_save())
+        existing = self.folder / "taken.edited"
+        existing.write_bytes(b"already here")
+        cases = {
+            "too high": (["--hydration", "101", "--out", str(self.out)],
+                         "hydration must be a number from 0 to 100"),
+            "left out of the save": (["--warmth", "50", "--out", str(self.out)],
+                                     "this save holds no number for"),
+            "no change": (["--condition", "76.66127", "--out", str(self.out)], "condition is already 76.7%"),
+            "one of two is refused": (["--condition", "100", "--warmth", "50", "--out", str(self.out)],
+                                      "this save holds no number for warmth"),
+            "output exists": (["--condition", "100", "--out", str(existing)], "already exists"),
+        }
+        before = self.snapshot()
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                code, out, err = self.run_command("set-player", str(self.save), *options)
+                self.assertEqual(code, 1)
+                self.assertIn("Refused:", err)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(existing.read_bytes(), b"already here")
+
+    def test_set_player_checks_the_output_path_before_any_edit_work(self) -> None:
+        self.save.write_bytes(player_save())
+        with mock.patch.object(edit, "set_player_values") as attempted:
+            code, _, _ = self.run_command("set-player", str(self.save), "--condition", "100",
+                                          "--out", str(self.folder / "sandbox16"))
+        self.assertEqual(code, 1)
+        attempted.assert_not_called()
+
+    def test_set_player_on_a_missing_save_is_a_usage_error(self) -> None:
+        code, out, err = self.run_command("set-player", str(self.folder / "sandbox99"), "--condition", "100",
+                                          "--out", str(self.out))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
+    def test_set_player_without_a_value_names_the_options(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as caught:
+            edit.main(["set-player", str(self.save), "--out", str(self.out)])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("set-player needs one or more of --condition, --calories, --hydration, --rest, --warmth",
+                      err.getvalue())
+        self.assertFalse(self.out.exists())
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)], ["repair-all", str(self.save)],
+                          ["set-player", str(self.save), "--condition", "100"],
+                          ["set-player", str(self.save), "--condition", "--out", str(self.out)],
                           ["copy-item", str(self.save), "--out", str(self.out)],
                           ["remove-item", str(self.save), "--out", str(self.out)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--out", str(self.out)],
@@ -3094,6 +3480,52 @@ class RealSaveTests(unittest.TestCase):
                                  before + [Item(len(items), target.prefab, target.count, target.condition)])
                 number = int(result.new_number)
                 self.assertTrue(number < 0 and number % 2 == 0, number)
+
+    def test_the_players_values_can_be_read_in_every_real_save(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        held = 0
+        for path in saves:
+            values = edit.read_player(codec.decode_save(path.read_bytes()))
+            self.assertEqual([value.name for value in values], list(edit.PLAYER_VALUES))
+            for value in values:
+                with self.subTest(save=path.name, value=value.name):
+                    self.assertIsNotNone(value.shown)
+                    highest = 2500 if value.name == "calories" else 105
+                    self.assertTrue(-5 <= value.shown <= highest, value.shown)
+                    # A number the save holds is in the form this tool writes.
+                    if value.stored is not None and (Decimal(value.stored) == 0
+                                                     or Decimal(value.stored) >= Decimal("0.0001")):
+                        self.assertEqual(edit.float32_literal(float(value.stored)), value.stored)
+                        held += 1
+        self.assertGreaterEqual(held, 3 * len(saves))
+
+    def test_the_players_values_can_be_changed_in_every_real_save(self) -> None:
+        """In memory only. No file is written. Every value a save holds is changed in one edit."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        best = {"condition": (100.0, 99.0), "calories": (2500.0, 2400.0), "hydration": (100.0, 90.0),
+                "rest": (100.0, 90.0), "warmth": (100.0, 90.0)}
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.read_player(codec.decode_save(original))
+                wanted = {value.name: best[value.name][value.shown == Decimal(repr(best[value.name][0]))]
+                          for value in before if value.stored is not None}
+                self.assertGreaterEqual(len(wanted), 3)
+                result = edit.set_player_values(original, wanted)
+                self.assertEqual({name for name, _, _ in result.changes}, set(wanted))
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                after = edit.read_player(codec.decode_save(result.data))
+                for old, new in zip(before, after):
+                    if old.name in wanted:
+                        self.assertEqual(new.shown, Decimal(repr(wanted[old.name])), old.name)
+                        self.assertEqual(new.stored, edit.stored_player_value(old.name, wanted[old.name]))
+                    else:
+                        self.assertEqual(new, old)
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])
