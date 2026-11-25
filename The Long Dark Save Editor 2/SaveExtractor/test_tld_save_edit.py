@@ -22,13 +22,13 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest import mock
 
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import EditError, Food, Item, Liquid, Stack
+from tld_save_edit import EditError, Food, Item, Liquid, Stack, Weapon
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -685,6 +685,301 @@ class SetCaloriesTests(unittest.TestCase):
         self.assertIn("m_CaloriesTotal: 461.6905 -> 500.0", str(caught.exception))
 
 
+def weapon_item(prefab: str, record: JsonValue = None) -> Dict[str, JsonValue]:
+    """An inventory item with a weapon record, or with an empty slot for one."""
+    made = item(prefab, None, "1.0")
+    made["m_SerializedGear"].value["m_WeaponItemSerialized"] = record        # type: ignore[union-attr,index]
+    return made
+
+
+def clip(*rounds: str, spent: Optional[str] = None) -> NestedJson:
+    """A weapon record as the game writes it: the rounds, then the spent casings when there are any."""
+    record: Dict[str, JsonValue] = {"m_Clip": [Number(value) for value in rounds]}
+    if spent is not None:
+        record["m_SpentCasingsInClip"] = Number(spent)
+    return NestedJson(record)
+
+
+def weapons_save(clips: Optional[Dict[int, Sequence[str]]] = None) -> bytes:
+    """A save whose inventory holds weapons in the forms real saves show, and items that hold no rounds.
+
+    clips replaces the rounds of the entries it names.
+    """
+    items: List[JsonValue] = [
+        # 0: a revolver with five rounds and one spent casing. 1: a second one with two rounds
+        weapon_item("GEAR_Revolver", clip("100", "100", "100", "100", "100", spent="1")),
+        weapon_item("GEAR_Revolver", clip("100", "100")),
+        # 2: an empty rifle. 3: a full rifle of a named kind. 4: an empty distress pistol
+        weapon_item("GEAR_Rifle", clip()),
+        weapon_item("GEAR_Rifle_Vaughns", clip(*["100"] * 10)),
+        weapon_item("GEAR_FlareGun", clip()),
+        # 5: an item with a weapon record that the tool has no number for
+        weapon_item("GEAR_Camera", clip()),
+        # 6: a record in the form the C# editor writes, with rounds that are not all 100
+        weapon_item("GEAR_RevolverGreen", NestedJson({
+            "m_RoundsInClipProxy": Number("0"), "m_IsJammed": False,
+            "m_Clip": [Number("100"), Number("87"), Number("55"), Number("9")],
+            "m_SpentCasingsInClip": Number("0")})),
+        # 7: a revolver that was fired until it was empty
+        weapon_item("GEAR_RevolverFancy", clip(spent="6")),
+        # 8: no weapon record. 9: an empty slot for one. 10: a record without a list of rounds
+        item("GEAR_Hatchet", None, "1.0"),
+        weapon_item("GEAR_Stone"),
+        weapon_item("GEAR_Bow", NestedJson({"m_IsJammed": False})),
+        # 11 to 13: rounds or spent casings that are no whole numbers
+        weapon_item("GEAR_Rifle_Barbs", NestedJson({"m_Clip": [Number("100"), "full"]})),
+        weapon_item("GEAR_Rifle_Curators", NestedJson({"m_Clip": [Number("100.5")]})),
+        weapon_item("GEAR_RevolverStubNosed", NestedJson({"m_Clip": [], "m_SpentCasingsInClip": Number("-1")})),
+    ]
+    for entry, rounds in (clips or {}).items():
+        record = items[entry]["m_SerializedGear"].value["m_WeaponItemSerialized"].value
+        record["m_Clip"] = [Number(value) for value in rounds]
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": items, "m_QuickSelectInstanceIDs": []}
+    return build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)})
+
+
+def clip_path(entry: int) -> str:
+    return liquid_path(entry, "m_WeaponItemSerialized > m_Clip")
+
+
+def rounds_in(save_bytes: bytes, entry: int) -> List[str]:
+    return [value.literal for value in amount_in(save_bytes, entry, "m_WeaponItemSerialized", "m_Clip")]
+
+
+class WeaponListTests(unittest.TestCase):
+    def test_lists_the_items_that_can_hold_rounds_in_save_order(self) -> None:
+        self.assertEqual(edit.list_weapons(codec.decode_save(weapons_save())), [
+            Weapon(0, "GEAR_Revolver", 5, 1, 6),
+            Weapon(1, "GEAR_Revolver", 2, 0, 6),
+            Weapon(2, "GEAR_Rifle", 0, 0, 10),
+            Weapon(3, "GEAR_Rifle_Vaughns", 10, 0, 10),
+            Weapon(4, "GEAR_FlareGun", 0, 0, 1),
+            Weapon(5, "GEAR_Camera", 0, 0, None),
+            Weapon(6, "GEAR_RevolverGreen", 4, 0, 6),
+            Weapon(7, "GEAR_RevolverFancy", 0, 6, 6),
+        ])
+
+    def test_a_save_without_weapons_gives_an_empty_list(self) -> None:
+        self.assertEqual(edit.list_weapons(codec.decode_save(build_save())), [])
+
+    def test_an_entry_without_a_name_is_left_out(self) -> None:
+        save = codec.decode_save(weapons_save())
+        del edit._inventory_items(save)[0]["m_PrefabName"]
+        self.assertEqual([weapon.entry for weapon in edit.list_weapons(save)], [1, 2, 3, 4, 5, 6, 7])
+
+    def test_what_each_weapon_holds(self) -> None:
+        rifles = {name for name in edit.ROUNDS_HELD if name.startswith("GEAR_Rifle")}
+        revolvers = {name for name in edit.ROUNDS_HELD if name.startswith("GEAR_Revolver")}
+        self.assertEqual(rifles, {"GEAR_Rifle", "GEAR_Rifle_Barbs", "GEAR_Rifle_Curators", "GEAR_Rifle_Trader",
+                                  "GEAR_Rifle_Vaughns"})
+        self.assertEqual(revolvers, {"GEAR_Revolver", "GEAR_RevolverFancy", "GEAR_RevolverGreen",
+                                     "GEAR_RevolverStubNosed"})
+        self.assertEqual({edit.ROUNDS_HELD[name] for name in rifles}, {10})
+        self.assertEqual({edit.ROUNDS_HELD[name] for name in revolvers}, {6})
+        self.assertEqual(edit.ROUNDS_HELD["GEAR_FlareGun"], 1)
+        self.assertEqual(len(edit.ROUNDS_HELD), len(rifles) + len(revolvers) + 1)
+
+    def test_every_weapon_the_tool_has_a_number_for_is_a_firearm_in_the_item_table(self) -> None:
+        import tld_taxonomy as taxonomy
+        for prefab, holds in edit.ROUNDS_HELD.items():
+            with self.subTest(prefab=prefab):
+                self.assertEqual(taxonomy.TAXONOMY_LOOKUP[prefab][:2], ("Weapons", "Firearms"))
+                self.assertGreater(holds, 0)
+
+
+class SetRoundsTests(unittest.TestCase):
+    def test_changes_exactly_the_list_of_rounds(self) -> None:
+        original = weapons_save()
+        result = edit.set_weapon_rounds(original, "GEAR_Revolver", 6, entry=1)
+        self.assertEqual((result.prefab, result.entry, result.old_rounds, result.new_rounds, result.holds),
+                         ("GEAR_Revolver", 1, 2, 6, 6))
+        # Built independently, with the one list changed.
+        self.assertEqual(result.data, weapons_save({1: ["100"] * 6}))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(clip_path(1), "2 items", "6 items")])
+        self.assertEqual(rounds_in(result.data, 1), ["100"] * 6)
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_each_kind_of_weapon_can_be_filled(self) -> None:
+        for prefab, holds in (("GEAR_Rifle", 10), ("GEAR_FlareGun", 1)):
+            with self.subTest(prefab=prefab):
+                result = edit.set_weapon_rounds(weapons_save(), prefab, holds)
+                self.assertEqual((result.old_rounds, result.new_rounds, result.holds), (0, holds, holds))
+                self.assertEqual(rounds_in(result.data, result.entry), ["100"] * holds)
+
+    def test_rounds_already_loaded_are_kept_when_more_are_added(self) -> None:
+        result = edit.set_weapon_rounds(weapons_save(), "GEAR_RevolverGreen", 6)
+        self.assertEqual(rounds_in(result.data, 6), ["100", "87", "55", "9", "100", "100"])
+        self.assertEqual(result.data, weapons_save({6: ["100", "87", "55", "9", "100", "100"]}))
+
+    def test_rounds_come_off_the_end_of_the_list(self) -> None:
+        original = weapons_save()
+        result = edit.set_weapon_rounds(original, "GEAR_RevolverGreen", 2)
+        self.assertEqual(rounds_in(result.data, 6), ["100", "87"])
+        self.assertEqual(result.data, weapons_save({6: ["100", "87"]}))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(clip_path(6), "4 items", "2 items")])
+
+    def test_a_weapon_can_be_emptied(self) -> None:
+        result = edit.set_weapon_rounds(weapons_save(), "GEAR_Rifle_Vaughns", 0)
+        self.assertEqual((result.old_rounds, result.new_rounds), (10, 0))
+        self.assertEqual(result.data, weapons_save({3: []}))
+
+    def test_spent_casings_are_left_alone(self) -> None:
+        result = edit.set_weapon_rounds(weapons_save(), "GEAR_Revolver", 4, entry=0)
+        self.assertEqual((result.old_rounds, result.new_rounds, result.holds), (5, 4, 6))
+        self.assertEqual(result.data, weapons_save({0: ["100"] * 4}))
+        self.assertEqual(amount_in(result.data, 0, "m_WeaponItemSerialized", "m_SpentCasingsInClip"),
+                         Number("1"))
+        self.assertEqual(edit.list_weapons(codec.decode_save(result.data))[0],
+                         Weapon(0, "GEAR_Revolver", 4, 1, 6))
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = weapons_save()
+        kept = bytes(original)
+        edit.set_weapon_rounds(original, "GEAR_Rifle", 10)
+        self.assertEqual(original, kept)
+
+    def test_rounds_must_fit_next_to_the_spent_casings(self) -> None:
+        cases = (
+            ("GEAR_Revolver", 0, 6, "GEAR_Revolver holds 6 rounds, and inventory entry 0 still has 1 spent "
+                                    "casing in it, so at most 5 fit. Reload it in the game to drop the "
+                                    "casings"),
+            ("GEAR_RevolverFancy", None, 1, "GEAR_RevolverFancy holds 6 rounds, and inventory entry 7 still "
+                                            "has 6 spent casings in it, so none fit. Reload it in the game"),
+        )
+        for prefab, entry, rounds, message in cases:
+            with self.subTest(prefab=prefab):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_weapon_rounds(weapons_save(), prefab, rounds, entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_as_many_rounds_as_fit_next_to_the_spent_casings_are_allowed(self) -> None:
+        emptied = edit.set_weapon_rounds(weapons_save(), "GEAR_Revolver", 0, entry=0).data
+        result = edit.set_weapon_rounds(emptied, "GEAR_Revolver", 5, entry=0)
+        self.assertEqual((result.old_rounds, result.new_rounds), (0, 5))
+        self.assertEqual(result.data, weapons_save())
+
+    def test_a_weapon_with_more_spent_casings_than_it_holds_can_still_be_emptied(self) -> None:
+        inventory: Dict[str, JsonValue] = {
+            "m_SerializedItems": [weapon_item("GEAR_Revolver", clip("100", spent="9"))],
+            "m_QuickSelectInstanceIDs": []}
+        save = build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)})
+        with self.assertRaises(EditError) as refused:
+            edit.set_weapon_rounds(save, "GEAR_Revolver", 2)
+        self.assertIn("still has 9 spent casings in it, so none fit", str(refused.exception))
+        self.assertEqual(rounds_in(edit.set_weapon_rounds(save, "GEAR_Revolver", 0).data, 0), [])
+
+    def test_more_than_the_weapon_holds_is_refused(self) -> None:
+        cases = (("GEAR_Revolver", 1, 7, "GEAR_Revolver holds 6 rounds, so 7 do not fit"),
+                 ("GEAR_Rifle", None, 11, "GEAR_Rifle holds 10 rounds, so 11 do not fit"),
+                 ("GEAR_FlareGun", None, 2, "GEAR_FlareGun holds 1 round, so 2 do not fit"))
+        for prefab, entry, rounds, message in cases:
+            with self.subTest(prefab=prefab):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_weapon_rounds(weapons_save(), prefab, rounds, entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_an_item_the_tool_has_no_number_for_is_refused(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_weapon_rounds(weapons_save(), "GEAR_Camera", 1)
+        self.assertIn("this tool has no number for the rounds GEAR_Camera holds, so it does not change them",
+                      str(refused.exception))
+
+    def test_requests_that_do_not_name_exactly_one_weapon_are_refused(self) -> None:
+        nothing = "the save holds no rounds for it, so there are none to set"
+        cases = (
+            ("GEAR_Revolver", None, "holds 2 entries of GEAR_Revolver that can hold rounds: entry 0 "
+                                    "(5 rounds), entry 1 (2 rounds). Add --entry"),
+            ("GEAR_Revolver", 2, "inventory entry 2 is GEAR_Rifle, not GEAR_Revolver. Run weapons again"),
+            ("GEAR_Revolver", 40, "there is no inventory entry 40. Entries run from 0 to 13"),
+            ("GEAR_Camira", None, "there is no GEAR_Camira in the inventory. Did you mean GEAR_Camera?"),
+            ("GEAR_Zzzzzzzz", None, "there is no GEAR_Zzzzzzzz in the inventory. Run weapons to see the item "
+                                    "names."),
+            ("GEAR_Hatchet", None, "GEAR_Hatchet is in the inventory, but " + nothing),
+            ("GEAR_Hatchet", 8, "inventory entry 8 is GEAR_Hatchet, and " + nothing),
+            ("GEAR_Stone", None, nothing),
+            ("GEAR_Bow", None, nothing),
+            ("GEAR_Rifle_Barbs", None, nothing),
+            ("GEAR_Rifle_Curators", 12, nothing),
+            ("GEAR_RevolverStubNosed", None, nothing),
+        )
+        for prefab, entry, message in cases:
+            with self.subTest(prefab=prefab, entry=entry):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_weapon_rounds(weapons_save(), prefab, 1, entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_a_close_name_is_only_suggested_when_that_item_can_hold_rounds(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_weapon_rounds(weapons_save(), "GEAR_Hatchett", 1)
+        self.assertIn("there is no GEAR_Hatchett in the inventory. Run weapons to see the item names.",
+                      str(refused.exception))
+
+    def test_the_number_it_already_holds_is_refused(self) -> None:
+        loaded = edit.set_weapon_rounds(weapons_save(), "GEAR_FlareGun", 1).data
+        cases = ((weapons_save(), "GEAR_Revolver", 1, 2, "already holds 2 rounds. Nothing to change"),
+                 (weapons_save(), "GEAR_Rifle", None, 0, "already holds 0 rounds. Nothing to change"),
+                 (loaded, "GEAR_FlareGun", None, 1, "already holds 1 round. Nothing to change"))
+        for save, prefab, entry, rounds, message in cases:
+            with self.subTest(prefab=prefab):
+                with self.assertRaises(EditError) as refused:
+                    edit.set_weapon_rounds(save, prefab, rounds, entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_a_negative_number_is_refused_before_the_save_is_read(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_weapon_rounds(b"not a save", "GEAR_Rifle", -1)
+        self.assertIn("the number of rounds must be a whole number from 0 up, not -1", str(refused.exception))
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.set_weapon_rounds(b"not a save", "GEAR_Rifle", 1)
+        self.assertIn("does not pass the exact rebuild check", str(refused.exception))
+
+    def encode_as(self, meant: bytes, wrong: bytes):
+        """Fault injection: an encoder that hands back wrong where the edit meant to write meant."""
+        real_encode = codec.encode_save
+
+        def encode_wrongly(save: DecodedSave) -> bytes:
+            encoded = real_encode(save)
+            return wrong if encoded == meant else encoded
+
+        return mock.patch.object(codec, "encode_save", side_effect=encode_wrongly)
+
+    def test_an_edit_that_writes_the_wrong_number_of_rounds_is_caught(self) -> None:
+        with self.encode_as(weapons_save({1: ["100"] * 6}), weapons_save({1: ["100"] * 5})):
+            with self.assertRaises(EditError) as caught:
+                edit.set_weapon_rounds(weapons_save(), "GEAR_Revolver", 6, entry=1)
+        self.assertIn("did not change exactly the one value asked for", str(caught.exception))
+        self.assertIn("2 items -> 5 items", str(caught.exception))
+
+    def test_an_edit_that_writes_a_wrong_round_is_caught(self) -> None:
+        # The right number of rounds, so the two saves differ in that one list only. The last round is wrong.
+        wrong = weapons_save({1: ["100", "100", "100", "100", "100", "99"]})
+        with self.encode_as(weapons_save({1: ["100"] * 6}), wrong):
+            with self.assertRaises(EditError) as caught:
+                edit.set_weapon_rounds(weapons_save(), "GEAR_Revolver", 6, entry=1)
+        self.assertIn("the rounds in the edited save are not the ones asked for", str(caught.exception))
+        self.assertIn("'99'", str(caught.exception))
+
+    def test_an_edit_that_changes_a_round_already_loaded_is_caught(self) -> None:
+        meant = weapons_save({6: ["100", "87", "55", "9", "100", "100"]})
+        wrong = weapons_save({6: ["100", "87", "55", "100", "100", "100"]})
+        with self.encode_as(meant, wrong):
+            with self.assertRaises(EditError) as caught:
+                edit.set_weapon_rounds(weapons_save(), "GEAR_RevolverGreen", 6)
+        self.assertIn("the rounds in the edited save are not the ones asked for", str(caught.exception))
+
+    def test_an_edit_that_also_changes_another_weapon_is_caught(self) -> None:
+        wrong = weapons_save({1: ["100"] * 6, 2: ["100"]})
+        with self.encode_as(weapons_save({1: ["100"] * 6}), wrong):
+            with self.assertRaises(EditError) as caught:
+                edit.set_weapon_rounds(weapons_save(), "GEAR_Revolver", 6, entry=1)
+        self.assertIn("did not change exactly the one value asked for", str(caught.exception))
+
+
 class StackListTests(unittest.TestCase):
     def test_lists_the_stacks_in_save_order(self) -> None:
         stacks = edit.list_stacks(codec.decode_save(build_save()))
@@ -1210,7 +1505,7 @@ class CommandTests(unittest.TestCase):
                                         "--count", "40", "--out", str(self.out))
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
-        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories"}))
+        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -1343,11 +1638,110 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--calories", err.getvalue())
         self.assertFalse(self.out.exists())
 
+    def test_weapons_lists_the_items_that_can_hold_rounds(self) -> None:
+        self.save.write_bytes(weapons_save())
+        code, out, err = self.run_command("weapons", str(self.save))
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "entry  item                rounds  spent casings  holds")
+        self.assertEqual([line.split() for line in lines[1:9]], [
+            ["0", "GEAR_Revolver", "5", "1", "6"],
+            ["1", "GEAR_Revolver", "2", "0", "6"],
+            ["2", "GEAR_Rifle", "0", "0", "10"],
+            ["3", "GEAR_Rifle_Vaughns", "10", "0", "10"],
+            ["4", "GEAR_FlareGun", "0", "0", "1"],
+            ["5", "GEAR_Camera", "0", "0"],
+            ["6", "GEAR_RevolverGreen", "4", "0", "6"],
+            ["7", "GEAR_RevolverFancy", "0", "6", "6"],
+        ])
+        self.assertEqual(lines[1], "    0  GEAR_Revolver            5              1      6")
+        self.assertEqual(lines[6], "    5  GEAR_Camera              0              0")
+        self.assertEqual(lines[9], "8 items that can hold rounds among 14 inventory items in sandbox15.")
+        self.assertEqual(err, "")
+
+    def test_weapons_on_a_save_without_weapons(self) -> None:
+        code, out, _ = self.run_command("weapons", str(self.save))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), [
+            "entry  item  rounds  spent casings  holds",
+            "0 items that can hold rounds among 5 inventory items in sandbox15."])
+
+    def test_weapons_counts_a_single_item_as_one_item(self) -> None:
+        inventory: Dict[str, JsonValue] = {"m_SerializedItems": [weapon_item("GEAR_Rifle", clip())],
+                                           "m_QuickSelectInstanceIDs": []}
+        self.save.write_bytes(build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)}))
+        code, out, _ = self.run_command("weapons", str(self.save))
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[-1],
+                         "1 item that can hold rounds among 1 inventory item in sandbox15.")
+
+    def test_set_rounds_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(weapons_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("set-rounds", str(self.save), "--item", "GEAR_Revolver",
+                                          "--entry", "1", "--rounds", "6", "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), weapons_save({1: ["100"] * 6}))
+        self.assertIn("GEAR_Revolver, inventory entry 1", out)
+        self.assertIn("Change:   rounds 2 -> 6 (GEAR_Revolver holds 6)\n", out)
+        self.assertIn("differs from the original in exactly this one value", out)
+        self.assertIn("2 of 3 entries are byte for byte unchanged", out)
+        self.assertIn("Untested: no save changed by set-rounds has been loaded in the game yet", out)
+        self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_set_rounds_without_an_entry_number(self) -> None:
+        self.save.write_bytes(weapons_save())
+        code, out, _ = self.run_command("set-rounds", str(self.save), "--item", "GEAR_Rifle", "--rounds", "3",
+                                        "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("Change:   rounds 0 -> 3 (GEAR_Rifle holds 10)\n", out)
+        self.assertEqual(self.out.read_bytes(), weapons_save({2: ["100"] * 3}))
+
+    def test_set_rounds_refusals_write_nothing(self) -> None:
+        self.save.write_bytes(weapons_save())
+        rifle = ["--item", "GEAR_Rifle"]
+        cases = {
+            "several": (["--item", "GEAR_Revolver", "--rounds", "6"], "Add --entry to say which one"),
+            "no rounds": (["--item", "GEAR_Hatchet", "--rounds", "1"], "holds no rounds"),
+            "unknown item": (["--item", "GEAR_Nope", "--rounds", "1"], "there is no GEAR_Nope in the"),
+            "same number": (rifle + ["--rounds", "0"], "already holds 0 rounds"),
+            "too many": (rifle + ["--rounds", "11"], "GEAR_Rifle holds 10 rounds, so 11 do not fit"),
+            "spent casings in the way": (["--item", "GEAR_Revolver", "--entry", "0", "--rounds", "6"],
+                                         "so at most 5 fit"),
+            "no number for it": (["--item", "GEAR_Camera", "--rounds", "1"], "has no number for the rounds"),
+            "negative": (rifle + ["--rounds=-1"], "from 0 up, not -1"),
+        }
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                before = self.snapshot()
+                code, out, err = self.run_command("set-rounds", str(self.save), *options,
+                                                  "--out", str(self.out))
+                self.assertEqual(code, 1)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+
+    def test_a_rounds_value_that_is_not_a_whole_number_is_a_usage_error(self) -> None:
+        for value in ("two", "2.5"):
+            with self.subTest(value=value):
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as caught:
+                        edit.main(["set-rounds", str(self.save), "--item", "GEAR_Rifle", "--rounds", value,
+                                   "--out", str(self.out)])
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn("--rounds", err.getvalue())
+        self.assertFalse(self.out.exists())
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--out", str(self.out)],
                           ["set-liters", str(self.save), "--item", "GEAR_LampFuel", "--out", str(self.out)],
                           ["set-calories", str(self.save), "--item", "GEAR_MRE", "--out", str(self.out)],
+                          ["set-rounds", str(self.save), "--item", "GEAR_Rifle", "--out", str(self.out)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--count", "two",
                            "--out", str(self.out)]):
             with self.subTest(" ".join(arguments[:1]) or "no arguments"):
@@ -1488,6 +1882,75 @@ class RealSaveTests(unittest.TestCase):
                         self.assertEqual(edit.float32_literal(float(food.literal)), food.literal)
                     checked += 1
         self.assertTrue(checked, "no real save holds an item with calories")
+
+    def test_the_rounds_of_one_weapon_can_be_changed_in_every_real_save_that_carries_one(self) -> None:
+        """In memory only. No file is written."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        edited = 0
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.list_weapons(codec.decode_save(original))
+                target = next((weapon for weapon in before
+                               if weapon.holds is not None and weapon.holds > weapon.spent), None)
+                if target is None or target.holds is None:
+                    continue
+                fits = target.holds - target.spent
+                rounds = fits if target.rounds != fits else 0
+                result = edit.set_weapon_rounds(original, target.prefab, rounds, entry=target.entry)
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                after = edit.list_weapons(codec.decode_save(result.data))
+                expected = [Weapon(weapon.entry, weapon.prefab,
+                                   rounds if weapon.entry == target.entry else weapon.rounds,
+                                   weapon.spent, weapon.holds) for weapon in before]
+                self.assertEqual(after, expected)
+                edited += 1
+        if not edited:
+            self.skipTest("no real save carries a weapon that this tool has a number for")
+
+    def test_every_weapon_record_in_a_real_inventory_can_be_read(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        for path in codec.find_saves(folder):
+            save = codec.decode_save(path.read_bytes())
+            for entry, item in enumerate(edit._inventory_items(save)):
+                record = item["m_SerializedGear"].value.get("m_WeaponItemSerialized")
+                if isinstance(record, NestedJson) and isinstance(record.value, dict) \
+                        and "m_Clip" in record.value:
+                    with self.subTest(save=path.name, entry=entry):
+                        self.assertIsNotNone(edit._weapon_of(item))
+
+    def test_no_weapon_anywhere_in_a_real_save_holds_more_than_this_tool_says_it_can(self) -> None:
+        # Everywhere means the inventory, containers and the ground. Items outside the inventory keep
+        # their record under the game's other spelling, m_SearializedGear.
+        def weapons_in(value: JsonValue) -> Iterator[Tuple[str, int]]:
+            if isinstance(value, NestedJson):
+                yield from weapons_in(value.value)
+            elif isinstance(value, dict):
+                prefab = value.get("m_PrefabName")
+                gear = value.get("m_SerializedGear") or value.get("m_SearializedGear")
+                if isinstance(prefab, str) and isinstance(gear, NestedJson):
+                    weapon = edit._weapon_of({"m_PrefabName": prefab, "m_SerializedGear": gear})
+                    if weapon is not None:
+                        yield prefab, len(weapon.clip) + weapon.spent
+                for inner in value.values():
+                    yield from weapons_in(inner)
+            elif isinstance(value, list):
+                for inner in value:
+                    yield from weapons_in(inner)
+
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        checked = 0
+        for path in codec.find_saves(folder):
+            for prefab, held in weapons_in(codec.decode_save(path.read_bytes()).slot):
+                if prefab in edit.ROUNDS_HELD:
+                    with self.subTest(save=path.name, prefab=prefab):
+                        self.assertLessEqual(held, edit.ROUNDS_HELD[prefab])
+                    checked += 1
+        if not checked:
+            self.skipTest("no real save holds a weapon that this tool has a number for")
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])

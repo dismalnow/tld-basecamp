@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, the condition of an inventory item, the liquid an inventory item holds, or the calories left in a food item |
+| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, the condition of an inventory item, the liquid an inventory item holds, the calories left in a food item, or the rounds loaded in a weapon |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -107,19 +107,18 @@ A document that cannot be written back identically is refused. Nothing is change
 Checked on 2026-11-20: 15 of 15 real saves rebuild byte for byte. They span game
 changelists 157357 to 189457 (v2.60).
 
-## Change a count, a condition, an amount of liquid or calories
+## Change one value in the inventory
 
 `tld_save_edit.py` changes one value in a save and writes the result to a new file. The
-save you name is only read. It can set the count of a stack in the player's inventory, the
-condition of an item in the player's inventory, the liquid such an item holds, or the
-calories left in a food item there.
+save you name is only read. Each command works on one item in the player's inventory.
 
-| Command | Tested in the game |
-|---|---|
-| `set-count` | Yes, on game v2.60 |
-| `set-condition` | Yes, on game v2.60 |
-| `set-liters` | Not yet. Its own output says so |
-| `set-calories` | Not yet. Its own output says so |
+| Command | What it changes | Tested in the game |
+|---|---|---|
+| `set-count` | The count of a stack | Yes, on game v2.60 |
+| `set-condition` | The condition of an item, or of a whole stack | Yes, on game v2.60 |
+| `set-liters` | The liquid an item holds | Not yet. Its own output says so |
+| `set-calories` | The calories left in a food item | Not yet. Its own output says so |
+| `set-rounds` | The rounds loaded in a rifle, a revolver or a distress pistol | Not yet. Its own output says so |
 
 ### Count
 
@@ -260,6 +259,62 @@ Things to know about calories:
   as the three whole ones next to them. Whether a package is open is left alone too.
 - The lowest amount is 1, because the game removes an item with nothing left. Removing an
   item is a separate edit that is not built yet: see `ROADMAP.md`.
+
+### Rounds
+
+Not tested in the game yet: nobody has loaded a save changed by `set-rounds`. Try it on a
+save you can afford to lose.
+
+```powershell
+$other = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox7"
+python tld_save_edit.py weapons $other
+python tld_save_edit.py set-rounds $other --item GEAR_Revolver --entry 67 --rounds 6 --out "$env:TEMP\sandbox7.edited"
+```
+
+`weapons` lists the inventory items that can hold rounds: the rounds loaded, the spent
+casings still in the weapon, and how many rounds it holds at once. `set-rounds` takes the new
+number of loaded rounds, from 0 to what the weapon holds. When the inventory holds more than
+one of a weapon, add `--entry` with the number from that list.
+
+```text
+entry  item           rounds  spent casings  holds
+   24  GEAR_Revolver       5              1      6
+   67  GEAR_Revolver       2              0      6
+2 items that can hold rounds among 69 inventory items in sandbox7.
+```
+
+```text
+Save:     sandbox7, 623,218 bytes, passes the exact rebuild check
+Item:     GEAR_Revolver, inventory entry 67
+Change:   rounds 2 -> 6 (GEAR_Revolver holds 6)
+Checked:  the edited save differs from the original in exactly this one value
+Checked:  12 of 13 entries are byte for byte unchanged (all except global)
+Untested: no save changed by set-rounds has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox7.edited, 623,134 bytes
+SHA-256:  2f822887de557676f2dfbd34951628b8d058ebf03442498f9614b7b268cced2c
+sandbox7 itself was not changed.
+```
+
+Things to know about rounds:
+
+- A save keeps the loaded rounds as a list, with one number for each round. All 39 loaded
+  rounds in 14 real saves are `100`, so a round that is added is written as `100`. Rounds
+  that are taken out come off the end of the list. The one value that changes is that list,
+  and the tool checks every round in it after the edit.
+- A save does not say how many rounds a weapon holds. The tool uses 10 for a rifle and 6 for
+  a revolver, as the game's wiki states. Real saves agree: the one loaded rifle holds 10,
+  and in the three revolvers with spent casings, rounds and casings add up to 6. The named
+  rifles and revolvers (`GEAR_Rifle_Vaughns`, `GEAR_RevolverGreen` and so on) are taken to
+  hold what the plain weapon holds. The tool uses 1 for the distress pistol. No save confirms
+  that: all 12 distress pistols in the saves are empty.
+- A revolver keeps its spent casings in the cylinder until it is reloaded. The tool leaves
+  them alone, so the rounds must fit next to them: with one spent casing, at most 5. Reload
+  the revolver in the game to drop the casings.
+- The loose ammunition you carry does not change. Rounds are added to the weapon or taken
+  out of it, and nothing else is touched. Whether the weapon is jammed is left alone too.
+- The camera keeps its film in the same kind of record, so `weapons` lists it. All three
+  cameras in the 14 saves are empty, so what a loaded camera looks like in a save is not
+  known yet. `set-rounds` refuses the camera, and its line has nothing under `holds`.
 
 ### The checks
 
@@ -439,8 +494,8 @@ python -m unittest -v
 ```
 
 With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
-liquid and one amount of calories in each real save that has them. That happens in memory
-only: no file is written. The apply tests copy each real
+liquid, one amount of calories and the rounds of one weapon in each real save that has
+them. That happens in memory only: no file is written. The apply tests copy each real
 save into a temporary folder and work on the copy. The reader tests write each real save's
 CSV to a temporary folder. Your save folder is only read. Allow about five minutes for the
 whole run.

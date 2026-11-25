@@ -7,20 +7,24 @@ Usage:
     python tld_save_edit.py stacks SAVE
     python tld_save_edit.py liquids SAVE
     python tld_save_edit.py foods SAVE
+    python tld_save_edit.py weapons SAVE
     python tld_save_edit.py set-count SAVE --item GEAR_NAME --count N --out NEW_FILE [--entry N]
     python tld_save_edit.py set-condition SAVE --item GEAR_NAME --condition PERCENT --out NEW_FILE [--entry N]
     python tld_save_edit.py set-liters SAVE --item GEAR_NAME --liters LITERS --out NEW_FILE [--entry N]
     python tld_save_edit.py set-calories SAVE --item GEAR_NAME --calories CALORIES --out NEW_FILE [--entry N]
+    python tld_save_edit.py set-rounds SAVE --item GEAR_NAME --rounds N --out NEW_FILE [--entry N]
 
 items lists everything in the player's inventory: entry number, item, count, condition.
-stacks lists only the stacks, liquids only the items that hold liquid, and foods only the
-items with calories. set-count changes the count of one stack. set-condition changes the
-condition of one item, or of one whole stack. set-liters changes the liquid one item
-holds: the water you carry, a bottle or can, or the fuel in a lamp. set-calories changes
-the calories left in one food item. Add --entry when the inventory holds more than one of
-that item.
+stacks lists only the stacks, liquids only the items that hold liquid, foods only the
+items with calories, and weapons only the items that can hold rounds. set-count changes
+the count of one stack. set-condition changes the condition of one item, or of one whole
+stack. set-liters changes the liquid one item holds: the water you carry, a bottle or
+can, or the fuel in a lamp. set-calories changes the calories left in one food item.
+set-rounds changes the rounds loaded in one rifle, revolver or distress pistol. Add
+--entry when the inventory holds more than one of that item.
 
-set-liters and set-calories have not been tested in the game yet. Their own output says so.
+set-liters, set-calories and set-rounds have not been tested in the game yet. Their own
+output says so.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -62,8 +66,19 @@ MAX_LITERS = 999         # far above anything the game holds. The limit only cat
 MIN_CALORIES = 1.0       # an item with nothing left is one the game removes
 MAX_CALORIES = 9999.0    # the most in 14 real saves is 1750. The limit only catches a slip of the hand
 
+# Rounds a firearm holds at once. A save does not say. The rifle and the revolver are from the
+# game's wiki, and real saves agree: a rifle with 10 rounds, and revolvers whose rounds and spent
+# casings add up to 6. The named variants are taken to hold what the plain weapon holds, and the
+# distress pistol its one shell.
+ROUNDS_HELD: Dict[str, int] = {
+    "GEAR_Rifle": 10, "GEAR_Rifle_Barbs": 10, "GEAR_Rifle_Curators": 10, "GEAR_Rifle_Trader": 10,
+    "GEAR_Rifle_Vaughns": 10,
+    "GEAR_Revolver": 6, "GEAR_RevolverFancy": 6, "GEAR_RevolverGreen": 6, "GEAR_RevolverStubNosed": 6,
+    "GEAR_FlareGun": 1,
+}
+
 # Kinds of edit that no one has loaded in the game yet. Their output says so.
-NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories"})
+NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds"})
 
 Difference = Tuple[str, str, str]
 
@@ -303,6 +318,71 @@ def list_foods(save: DecodedSave) -> List[Food]:
     return foods
 
 
+# Where a weapon keeps its rounds: the record, the loaded rounds, and the spent casings still in it.
+_WEAPON_RECORD = "m_WeaponItemSerialized"
+_CLIP = "m_Clip"
+_SPENT_CASINGS = "m_SpentCasingsInClip"
+
+# A loaded round is one number in the save. Every loaded round in 14 real saves is stored as 100.
+_NEW_ROUND = "100"
+
+
+@dataclass(frozen=True)
+class Weapon:
+    entry: int                    # position in the save's inventory list, starting at 0
+    prefab: str
+    rounds: int                   # rounds loaded
+    spent: int                    # spent casings still in it. A revolver keeps them until it is reloaded
+    holds: Optional[int]          # rounds it holds at once, or None when this tool has no number for it
+
+
+@dataclass(frozen=True)
+class _WeaponRecord:
+    content: Dict[str, JsonValue]    # the record that holds the rounds
+    clip: List[Number]               # one number for each loaded round
+    spent: int
+
+
+def _whole(value: JsonValue) -> Optional[int]:
+    """A stored whole number that is not negative. None for anything else."""
+    return int(value.literal) if isinstance(value, Number) and value.literal.isdigit() else None
+
+
+def _weapon_of(item: JsonValue) -> Optional[_WeaponRecord]:
+    """The weapon record of an inventory entry, with its loaded rounds and its spent casings.
+
+    None when the entry has no such record, the record has no list of rounds, or the rounds
+    or the spent casings are not stored as whole numbers.
+    """
+    gear = _gear_of(item)
+    record = gear.get(_WEAPON_RECORD) if gear is not None else None
+    content = record.value if isinstance(record, NestedJson) else None
+    clip = content.get(_CLIP) if isinstance(content, dict) else None
+    if not isinstance(content, dict) or not isinstance(clip, list):
+        return None
+    rounds = [value for value in clip if isinstance(value, Number) and _whole(value) is not None]
+    spent = _whole(content[_SPENT_CASINGS]) if _SPENT_CASINGS in content else 0
+    if len(rounds) != len(clip) or spent is None:
+        return None
+    return _WeaponRecord(content, rounds, spent)
+
+
+def _count_text(count: int, one: str) -> str:
+    return f"{count} {one}" if count == 1 else f"{count} {one}s"
+
+
+def list_weapons(save: DecodedSave) -> List[Weapon]:
+    """Every inventory entry that can hold rounds, in save order."""
+    weapons: List[Weapon] = []
+    for entry, item in enumerate(_inventory_items(save)):
+        found = _weapon_of(item)
+        prefab = _prefab_of(item)
+        if found is None or prefab is None:
+            continue
+        weapons.append(Weapon(entry, prefab, len(found.clip), found.spent, ROUNDS_HELD.get(prefab)))
+    return weapons
+
+
 def _item_at(items: List[JsonValue], prefab: str, entry: int, listing: str) -> JsonValue:
     """The inventory entry with this number, once it is confirmed to be the named item."""
     if not 0 <= entry < len(items):
@@ -432,6 +512,36 @@ def _select_food(items: List[JsonValue], prefab: str, entry: Optional[int]) -> T
     return foods[0]
 
 
+def _select_weapon(items: List[JsonValue], prefab: str, entry: Optional[int]) -> Tuple[int, _WeaponRecord]:
+    """The one entry that can hold rounds and is meant, with its entry number.
+
+    Raises EditError unless exactly one such entry is meant.
+    """
+    nothing_to_set = "the save holds no rounds for it, so there are none to set"
+    if entry is not None:
+        found = _weapon_of(_item_at(items, prefab, entry, "weapons"))
+        if found is None:
+            raise EditError(f"inventory entry {entry} is {prefab}, and {nothing_to_set}")
+        return entry, found
+    names = [_prefab_of(item) for item in items]
+    if prefab not in names:
+        raise _no_such_item(prefab, [name for name, item in zip(names, items) if _weapon_of(item) is not None],
+                            "weapons")
+    weapons: List[Tuple[int, _WeaponRecord]] = []
+    for position, item in enumerate(items):
+        found = _weapon_of(item) if names[position] == prefab else None
+        if found is not None:
+            weapons.append((position, found))
+    if not weapons:
+        raise EditError(f"{prefab} is in the inventory, but {nothing_to_set}")
+    if len(weapons) > 1:
+        listing = ", ".join(f"entry {position} ({_count_text(len(found.clip), 'round')})"
+                            for position, found in weapons)
+        raise EditError(f"the inventory holds {len(weapons)} entries of {prefab} that can hold rounds: "
+                        f"{listing}. Add --entry to say which one")
+    return weapons[0]
+
+
 # ---------------------------------------------------------------------------
 # Condition as the game stores it
 # ---------------------------------------------------------------------------
@@ -538,6 +648,10 @@ def _liquid_path(entry: int, liquid: _LiquidRecord) -> str:
 
 def _calories_path(entry: int) -> str:
     return _gear_path(entry, f"{_FOOD_RECORD} > {_CALORIES_LEFT}")
+
+
+def _clip_path(entry: int) -> str:
+    return _gear_path(entry, f"{_WEAPON_RECORD} > {_CLIP}")
 
 
 def _prove_single_change(original: bytes, edited: bytes, expected: Difference) -> Tuple[int, int]:
@@ -724,6 +838,72 @@ def set_item_calories(original: bytes, prefab: str, calories: float,
                         entries, unchanged)
 
 
+@dataclass(frozen=True)
+class RoundsEdit:
+    data: bytes               # the edited save
+    prefab: str
+    entry: int
+    old_rounds: int
+    new_rounds: int
+    holds: int                # rounds the weapon holds at once
+    entries: int              # entries in the save
+    unchanged_entries: int    # entries that are byte for byte the original
+
+
+def _prove_clip(edited: bytes, entry: int, expected: List[str]) -> None:
+    """Decode the edited save afresh and confirm that the weapon holds exactly the expected rounds.
+
+    The comparison of two saves reports a list that changed its length as one difference and
+    does not look inside it. So the rounds themselves are checked here.
+    """
+    weapon = _weapon_of(_inventory_items(codec.decode_save(edited))[entry])
+    found = None if weapon is None else [value.literal for value in weapon.clip]
+    if found != expected:
+        raise EditError("safety check failed: the rounds in the edited save are not the ones asked for. "
+                        f"Found: {found}")
+
+
+def set_weapon_rounds(original: bytes, prefab: str, rounds: int, entry: Optional[int] = None) -> RoundsEdit:
+    """Return the save with the rounds loaded in one inventory weapon changed. Reads and writes no file.
+
+    A round that is added is stored the way real saves store a loaded round. Rounds that are
+    taken out come off the end of the list. Raises EditError under the same rules as
+    set_stack_count, when the save holds no rounds for the entry, when this tool has no
+    number for what the weapon holds, and when the rounds do not fit next to the spent
+    casings still in the weapon.
+    """
+    if rounds < 0:
+        raise EditError(f"the number of rounds must be a whole number from 0 up, not {rounds}")
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    chosen, weapon = _select_weapon(_inventory_items(save), prefab, entry)
+    holds = ROUNDS_HELD.get(prefab)
+    if holds is None:
+        raise EditError(f"this tool has no number for the rounds {prefab} holds, so it does not change them")
+    fit = max(holds - weapon.spent, 0)
+    if rounds > fit and weapon.spent:
+        room = "none fit" if fit == 0 else f"at most {fit} fit"
+        raise EditError(f"{prefab} holds {_count_text(holds, 'round')}, and inventory entry {chosen} still has "
+                        f"{_count_text(weapon.spent, 'spent casing')} in it, so {room}. Reload it in the game "
+                        "to drop the casings")
+    if rounds > fit:
+        raise EditError(f"{prefab} holds {_count_text(holds, 'round')}, so {rounds} do not fit")
+    old = len(weapon.clip)
+    if rounds == old:
+        raise EditError(f"inventory entry {chosen} ({prefab}) already holds {_count_text(rounds, 'round')}. "
+                        "Nothing to change")
+    added = max(rounds - old, 0)
+    expected_rounds = [value.literal for value in weapon.clip[:rounds]] + [_NEW_ROUND] * added
+    weapon.content[_CLIP] = weapon.clip[:rounds] + [Number(_NEW_ROUND) for _ in range(added)]
+    edited = codec.encode_save(save)
+    expected = (_clip_path(chosen), f"{old} items", f"{rounds} items")
+    entries, unchanged = _prove_single_change(original, edited, expected)
+    _prove_clip(edited, chosen, expected_rounds)
+    return RoundsEdit(edited, prefab, chosen, old, rounds, holds, entries, unchanged)
+
+
 # ---------------------------------------------------------------------------
 # Writing the new file
 # ---------------------------------------------------------------------------
@@ -852,6 +1032,27 @@ def _run_foods(path: Path) -> int:
     return 0
 
 
+def _run_weapons(path: Path) -> int:
+    data = _read_save(path)
+    if data is None:
+        return 2
+    try:
+        save = codec.decode_save(data)
+        listed = list_weapons(save)
+        total = len(_inventory_items(save))
+    except (EditError, codec.SaveFormatError) as error:
+        print(f"Refused: {error}", file=sys.stderr)
+        return 1
+    width = max([len(row.prefab) for row in listed] + [4])
+    print(f"{'entry':>5}  {'item':<{width}}  rounds  spent casings  holds")
+    for row in listed:
+        holds = "" if row.holds is None else str(row.holds)
+        print(f"{row.entry:>5}  {row.prefab:<{width}}  {row.rounds:>6}  {row.spent:>13}  {holds:>5}".rstrip())
+    print(f"{_count_text(len(listed), 'item')} that can hold rounds among "
+          f"{_count_text(total, 'inventory item')} in {path.name}.")
+    return 0
+
+
 def _percent(stored: str) -> str:
     return f"{float(stored) * 100:.1f}%"
 
@@ -861,7 +1062,7 @@ def _run_edit(path: Path, out: Path, command: str, prefab: str, value: Union[flo
     data = _read_save(path)
     if data is None:
         return 2
-    edit: Union[CountEdit, ConditionEdit, LitersEdit, CaloriesEdit]
+    edit: Union[CountEdit, ConditionEdit, LitersEdit, CaloriesEdit, RoundsEdit]
     try:
         check_new_file_path(out)
         if command == "set-count":
@@ -876,6 +1077,9 @@ def _run_edit(path: Path, out: Path, command: str, prefab: str, value: Union[flo
             change = f"calories {edit.old_calories} -> {edit.new_calories}"
             if edit.count is not None and edit.count > 1:
                 change += f" per unit, in a stack of {edit.count}"
+        elif command == "set-rounds":
+            edit = set_weapon_rounds(data, prefab, int(value), entry)
+            change = f"rounds {edit.old_rounds} -> {edit.new_rounds} ({edit.prefab} holds {edit.holds})"
         else:
             edit = set_item_condition(data, prefab, float(value), entry)
             change = (f"condition {_percent(edit.old_condition)} -> {_percent(edit.new_condition)} "
@@ -918,6 +1122,7 @@ Examples:
   python tld_save_edit.py set-condition sandbox15 --item GEAR_Hatchet --condition 100 --out sandbox15.edited
   python tld_save_edit.py set-liters sandbox15 --item GEAR_LampFuel --liters 0.5 --out sandbox15.edited
   python tld_save_edit.py set-calories sandbox15 --item GEAR_MRE --calories 1750 --out sandbox15.edited
+  python tld_save_edit.py set-rounds sandbox15 --item GEAR_Revolver --rounds 6 --out sandbox15.edited
 
 Exit codes: 0 done, 1 refused (the reason is printed), 2 the save was not found or an
 option was wrong.
@@ -927,7 +1132,8 @@ option was wrong.
     for name, text in (("items", "list everything in the player's inventory"),
                        ("stacks", "list the stacks in the player's inventory"),
                        ("liquids", "list the inventory items that hold liquid"),
-                       ("foods", "list the inventory items with calories")):
+                       ("foods", "list the inventory items with calories"),
+                       ("weapons", "list the inventory items that can hold rounds")):
         listing = commands.add_parser(name, help=text)
         listing.add_argument("save", type=Path, metavar="SAVE", help="the save file to read")
     set_count = commands.add_parser("set-count", help="change the count of one inventory stack")
@@ -982,6 +1188,19 @@ option was wrong.
                                    "more than one of the item")
     set_calories.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                               help="the file to create. It must not exist yet")
+    set_rounds = commands.add_parser("set-rounds", help="change the rounds loaded in one inventory weapon "
+                                                        "(not tested in the game yet)")
+    set_rounds.add_argument("save", type=Path, metavar="SAVE",
+                            help="the save file to read. It is not changed")
+    set_rounds.add_argument("--item", required=True, metavar="GEAR_NAME",
+                            help="the weapon, as weapons prints it, for example GEAR_Revolver")
+    set_rounds.add_argument("--rounds", required=True, type=int, metavar="N",
+                            help="the new number of loaded rounds, from 0 to what the weapon holds")
+    set_rounds.add_argument("--entry", type=int, metavar="N",
+                            help="the entry number from weapons. Needed when the inventory holds "
+                                 "more than one of the weapon")
+    set_rounds.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
+                            help="the file to create. It must not exist yet")
     args = parser.parse_args(argv)
     if args.command in ("items", "stacks"):
         return _run_list(args.save, stacks_only=args.command == "stacks")
@@ -989,6 +1208,8 @@ option was wrong.
         return _run_liquids(args.save)
     if args.command == "foods":
         return _run_foods(args.save)
+    if args.command == "weapons":
+        return _run_weapons(args.save)
     value: Union[float, Decimal]
     if args.command == "set-count":
         value = args.count
@@ -996,6 +1217,8 @@ option was wrong.
         value = args.liters
     elif args.command == "set-calories":
         value = args.calories
+    elif args.command == "set-rounds":
+        value = args.rounds
     else:
         value = args.condition
     return _run_edit(args.save, args.out, args.command, args.item, value, args.entry)
