@@ -28,7 +28,7 @@ from unittest import mock
 import tld_save_codec as codec
 import tld_save_edit as edit
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
-from tld_save_edit import EditError, Food, Item, Liquid, PlayerValue, Skill, Stack, Weapon
+from tld_save_edit import Affliction, EditError, Food, Item, Liquid, PlayerValue, Skill, Stack, Weapon
 
 # (item, count or None when the item is not a stack, condition)
 ItemSpec = Tuple[str, Optional[str], str]
@@ -2678,6 +2678,336 @@ class SetSkillTests(unittest.TestCase):
                                  "original one with m_Points 40 put in front: the record cannot be read")
 
 
+SPRAIN_LISTS = ("m_CausesLocIDs", "m_Locations", "m_ElapsedHoursList", "m_DurationHoursList",
+                "m_ElapsedRestList")
+# The kinds of affliction the tool reads, in the order of the save: (the name the tool prints, the
+# record of the kind, the lists that hold one item for each case). A kind without lists has a switch.
+AFFLICTION_RECORDS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    ("hypothermia", "m_HypothermiaSerialized", ()),
+    ("sprain-pain", "m_SprainPainSerialized", ("m_Locations", "m_Causes", "m_EndTimes")),
+    ("sprained-ankle", "m_SprainedAnkleSerialized", SPRAIN_LISTS),
+    ("sprained-wrist", "m_SprainedWristSerialized", SPRAIN_LISTS),
+    ("burns", "m_BurnsSerialized", ()),
+)
+EVERY_KIND = tuple(name for name, _, _ in AFFLICTION_RECORDS)
+
+
+def afflictions_save(hypothermia: JsonValue = None, burns: JsonValue = None, pain: int = 0, ankles: int = 0,
+                     wrists: int = 0, cured: Sequence[str] = (), records: Optional[Dict[str, JsonValue]] = None,
+                     burns_first: bool = False) -> bytes:
+    """A save with the five records of the afflictions the tool reads, the way the game writes them.
+
+    hypothermia and burns give the switch of the record: True or False, None to leave it out as
+    the game does while it is off, or any other value to put in its place. pain, ankles and
+    wrists give the number of cases. cured names the kinds to write the way they look once the
+    tool has cured them: a switch that was on is off, the lists are empty, and every other field
+    is as it was. records puts another value where a whole record belongs, by the name of the
+    record. burns_first moves the record of the burns in front of the others.
+    """
+    def switch(name: str, held: JsonValue, others: Dict[str, JsonValue]) -> NestedJson:
+        content: Dict[str, JsonValue] = {}
+        if held is not None:
+            content["m_Active"] = False if held is True and name in cured else held
+        content.update(others)
+        return NestedJson(content)
+
+    def sprains(name: str, count: int, others: Dict[str, JsonValue]) -> NestedJson:
+        cases = 0 if name in cured else count
+        content = dict(others)
+        content["m_CausesLocIDs"] = ["GAMEPLAY_Fall"] * cases
+        content["m_Locations"] = [Number(str(3 + 2 * case)) for case in range(cases)]
+        content["m_ElapsedHoursList"] = [Number(f"{3 + case}.31633782") for case in range(cases)]
+        content["m_DurationHoursList"] = [Number(f"{61 + case}.7218") for case in range(cases)]
+        content["m_ElapsedRestList"] = [Number("0.0")] * cases
+        return NestedJson(content)
+
+    aching = 0 if "sprain-pain" in cured else pain
+    pulse: Dict[str, JsonValue] = {"m_SecondsSinceLastPulseFx": Number("10.0")} if pain else {}
+    whole: Dict[str, JsonValue] = {
+        "m_HypothermiaSerialized": switch("hypothermia", hypothermia, {
+            "m_ElapsedWarmTime": Number("8.781072"), "m_CauseLocID": "GAMEPLAY_ColdWeather"}),
+        # Four records the tool does not read. Each of them holds a case, or a bonus that is on.
+        "m_WellFedSerialized": NestedJson({"m_Active": True,
+                                           "m_ElapsedHoursNotStarving": Number("72.0000458")}),
+        "m_FrostbiteSerialized": NestedJson({
+            "m_LocationsWithActiveFrostbite": [Number("2")], "m_LocationsWithFrostbiteRisk": [],
+            "m_LocationsCurrentFrostbiteDamage": [Number("0.0")] * 12}),
+        "m_FoodPoisoningSerialized": NestedJson({"m_Active": True, "m_CauseLocID": "GAMEPLAY_TaintedFood"}),
+        "m_SprainPainSerialized": NestedJson({
+            **pulse,
+            "m_Locations": [Number(str(5 + 6 * case)) for case in range(aching)],
+            "m_Causes": ["GAMEPLAY_Fall"] * aching,
+            "m_EndTimes": [Number(f"{14 + case}.8732967") for case in range(aching)]}),
+        "m_SprainedAnkleSerialized": sprains("sprained-ankle", ankles, {
+            "m_SecondsSinceLastPainAudio": Number("8.35467"),
+            "m_SecondsUntilNextPainAudio": Number("40.6274529")}),
+        "m_SprainedWristSerialized": sprains("sprained-wrist", wrists, {}),
+        "m_SprainsSerialized": NestedJson({"m_HadSprainRiskAffliction": True}),
+        "m_BurnsSerialized": switch("burns", burns, {
+            "m_ElapsedHours": Number("0.0009635717"), "m_DurationHours": Number("35.1657333"),
+            "m_SecondsUntilNextBurnReminder": Number("7.71092844"), "m_CauseLocID": "GAMEPLAY_Campfire"}),
+        "m_BurnsElectricSerialized": NestedJson({"m_Active": True}),
+        "m_Inventory_Serialized": NestedJson(
+            {"m_SerializedItems": [item(*spec) for spec in DEFAULT_ITEMS], "m_QuickSelectInstanceIDs": []}),
+    }
+    whole.update(records or {})
+    if burns_first:
+        whole = {"m_BurnsSerialized": whole["m_BurnsSerialized"], **whole}
+    return build_save(global_document=whole)
+
+
+def affliction_path(record: str, field: str) -> str:
+    return f"m_Dict > global > {record} > {field}"
+
+
+class AfflictionListTests(unittest.TestCase):
+    def listed(self, save: bytes) -> List[Affliction]:
+        return edit.list_afflictions(codec.decode_save(save))
+
+    def cases(self, save: bytes) -> List[Optional[int]]:
+        return [kind.cases for kind in self.listed(save)]
+
+    def test_a_save_without_a_case_lists_the_five_kinds_with_none(self) -> None:
+        # The save holds frostbite, food poisoning, an electric burn and the Well Fed bonus. None counts.
+        self.assertEqual(self.listed(afflictions_save()), [
+            Affliction("hypothermia", "m_HypothermiaSerialized", 0),
+            Affliction("sprain-pain", "m_SprainPainSerialized", 0),
+            Affliction("sprained-ankle", "m_SprainedAnkleSerialized", 0),
+            Affliction("sprained-wrist", "m_SprainedWristSerialized", 0),
+            Affliction("burns", "m_BurnsSerialized", 0),
+        ])
+
+    def test_the_tool_reads_these_five_kinds(self) -> None:
+        self.assertEqual([(name, kind.record, kind.lists) for name, kind in edit.AFFLICTIONS.items()],
+                         list(AFFLICTION_RECORDS))
+
+    def test_the_cases_of_each_kind_are_counted(self) -> None:
+        self.assertEqual(self.cases(afflictions_save(hypothermia=True, burns=True, pain=1, ankles=3, wrists=2)),
+                         [1, 1, 3, 2, 1])
+        self.assertEqual(self.cases(afflictions_save(hypothermia=True)), [1, 0, 0, 0, 0])
+        self.assertEqual(self.cases(afflictions_save(burns=True)), [0, 0, 0, 0, 1])
+        self.assertEqual(self.cases(afflictions_save(pain=2)), [0, 2, 0, 0, 0])
+        self.assertEqual(self.cases(afflictions_save(ankles=1)), [0, 0, 1, 0, 0])
+        self.assertEqual(self.cases(afflictions_save(wrists=1)), [0, 0, 0, 1, 0])
+
+    def test_a_switch_that_is_off_is_no_case(self) -> None:
+        # The game leaves the switch out while it is off. The old C# editor writes it as false.
+        self.assertEqual(self.cases(afflictions_save(hypothermia=False, burns=False)), [0, 0, 0, 0, 0])
+        self.assertEqual(self.cases(afflictions_save(hypothermia=False, burns=True)), [0, 0, 0, 0, 1])
+
+    def test_kinds_that_cannot_be_read_are_marked(self) -> None:
+        wrist = "m_SprainedWristSerialized"
+        two = {"m_CausesLocIDs": ["GAMEPLAY_Fall"] * 2, "m_Locations": [Number("3"), Number("5")],
+               "m_ElapsedHoursList": [Number("3.3"), Number("0.0")],
+               "m_DurationHoursList": [Number("61.7"), Number("65.3")],
+               "m_ElapsedRestList": [Number("0.0"), Number("0.0")]}
+        cases = {
+            "no record": {wrist: None},
+            "a record that is no nested document": {wrist: two},
+            "a nested document that is no record": {wrist: NestedJson([])},
+            "a list is missing": {wrist: NestedJson({key: held for key, held in two.items()
+                                                     if key != "m_ElapsedRestList"})},
+            "a list is no list": {wrist: NestedJson({**two, "m_Locations": Number("2")})},
+            "one list is shorter": {wrist: NestedJson({**two, "m_DurationHoursList": [Number("61.7")]})},
+            "one list is longer": {wrist: NestedJson({**two, "m_CausesLocIDs": ["GAMEPLAY_Fall"] * 3})},
+        }
+        self.assertEqual(self.cases(afflictions_save(records={wrist: NestedJson(two)})), [0, 0, 0, 2, 0])
+        for name, records in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.listed(afflictions_save(hypothermia=True, records=records)), [
+                    Affliction("hypothermia", "m_HypothermiaSerialized", 1),
+                    Affliction("sprain-pain", "m_SprainPainSerialized", 0),
+                    Affliction("sprained-ankle", "m_SprainedAnkleSerialized", 0),
+                    Affliction("sprained-wrist", wrist, None),
+                    Affliction("burns", "m_BurnsSerialized", 0),
+                ])
+
+    def test_a_switch_that_is_neither_on_nor_off_cannot_be_read(self) -> None:
+        for held in (Number("1"), "true", [True]):
+            with self.subTest(held=held):
+                self.assertEqual(self.cases(afflictions_save(hypothermia=held, burns=True)), [None, 0, 0, 0, 1])
+        nothing = afflictions_save(records={"m_BurnsSerialized": NestedJson({"m_Active": None})})
+        self.assertEqual(self.cases(nothing), [0, 0, 0, 0, None])
+        for name, record in (("no record", None), ("a record that is no nested document", {"m_Active": True}),
+                             ("a nested document that is no record", NestedJson([True]))):
+            with self.subTest(name):
+                self.assertEqual(self.cases(afflictions_save(records={"m_BurnsSerialized": record})),
+                                 [0, 0, 0, 0, None])
+
+
+class CureTests(unittest.TestCase):
+    def refusal(self, save: bytes) -> str:
+        with self.assertRaises(EditError) as refused:
+            edit.cure_afflictions(save)
+        return str(refused.exception)
+
+    def test_every_case_of_every_kind_is_ended(self) -> None:
+        original = afflictions_save(hypothermia=True, burns=True, pain=1, ankles=1, wrists=2)
+        result = edit.cure_afflictions(original)
+        self.assertEqual(result.cured, (("hypothermia", 1), ("sprain-pain", 1), ("sprained-ankle", 1),
+                                        ("sprained-wrist", 2), ("burns", 1)))
+        # Built independently: the switches off, the lists empty, and every other field as it was.
+        self.assertEqual(result.data, afflictions_save(hypothermia=True, burns=True, pain=1, ankles=1, wrists=2,
+                                                       cured=EVERY_KIND))
+        self.assertEqual(slot_differences(original, result.data), [
+            (affliction_path("m_HypothermiaSerialized", "m_Active"), "true", "false"),
+            (affliction_path("m_SprainPainSerialized", "m_Locations"), "1 items", "0 items"),
+            (affliction_path("m_SprainPainSerialized", "m_Causes"), "1 items", "0 items"),
+            (affliction_path("m_SprainPainSerialized", "m_EndTimes"), "1 items", "0 items"),
+            *[(affliction_path("m_SprainedAnkleSerialized", held), "1 items", "0 items")
+              for held in SPRAIN_LISTS],
+            *[(affliction_path("m_SprainedWristSerialized", held), "2 items", "0 items")
+              for held in SPRAIN_LISTS],
+            (affliction_path("m_BurnsSerialized", "m_Active"), "true", "false"),
+        ])
+        self.assertEqual((result.changes, result.entries, result.unchanged_entries), (15, 3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+        after = edit.list_afflictions(codec.decode_save(result.data))
+        self.assertEqual([kind.cases for kind in after], [0] * 5)
+
+    def test_one_kind_alone_is_ended(self) -> None:
+        for given, name, cases, changes in (({"hypothermia": True}, "hypothermia", 1, 1),
+                                            ({"burns": True}, "burns", 1, 1),
+                                            ({"pain": 2}, "sprain-pain", 2, 3),
+                                            ({"ankles": 1}, "sprained-ankle", 1, 5),
+                                            ({"wrists": 3}, "sprained-wrist", 3, 5)):
+            with self.subTest(name):
+                original = afflictions_save(**given)
+                result = edit.cure_afflictions(original)
+                self.assertEqual(result.cured, ((name, cases),))
+                self.assertEqual(result.data, afflictions_save(**given, cured=(name,)))
+                self.assertEqual((result.changes, result.entries, result.unchanged_entries), (changes, 3, 2))
+
+    def test_what_else_a_record_holds_stays(self) -> None:
+        result = edit.cure_afflictions(afflictions_save(hypothermia=True, pain=2, ankles=1))
+        document = codec.decode_save(result.data).entries["global"]
+        self.assertEqual(document["m_HypothermiaSerialized"].value, {
+            "m_Active": False, "m_ElapsedWarmTime": Number("8.781072"), "m_CauseLocID": "GAMEPLAY_ColdWeather"})
+        self.assertEqual(document["m_SprainPainSerialized"].value, {
+            "m_SecondsSinceLastPulseFx": Number("10.0"), "m_Locations": [], "m_Causes": [], "m_EndTimes": []})
+        self.assertEqual(list(document["m_SprainedAnkleSerialized"].value),
+                         ["m_SecondsSinceLastPainAudio", "m_SecondsUntilNextPainAudio", *SPRAIN_LISTS])
+
+    def test_afflictions_the_tool_does_not_read_are_left_as_they_are(self) -> None:
+        cured = codec.decode_save(edit.cure_afflictions(afflictions_save(hypothermia=True, burns=True)).data)
+        document = cured.entries["global"]
+        self.assertIs(document["m_FoodPoisoningSerialized"].value["m_Active"], True)
+        self.assertIs(document["m_BurnsElectricSerialized"].value["m_Active"], True)
+        self.assertIs(document["m_WellFedSerialized"].value["m_Active"], True)
+        self.assertEqual(document["m_FrostbiteSerialized"].value["m_LocationsWithActiveFrostbite"],
+                         [Number("2")])
+
+    def test_a_switch_the_save_holds_as_off_is_left_alone(self) -> None:
+        original = afflictions_save(hypothermia=False, burns=True)
+        result = edit.cure_afflictions(original)
+        self.assertEqual(result.cured, (("burns", 1),))
+        self.assertEqual(result.data, afflictions_save(hypothermia=False, burns=True, cured=("burns",)))
+        self.assertEqual(slot_differences(original, result.data),
+                         [(affliction_path("m_BurnsSerialized", "m_Active"), "true", "false")])
+
+    def test_the_changes_are_made_in_the_order_of_the_save(self) -> None:
+        original = afflictions_save(hypothermia=True, burns=True, wrists=1, burns_first=True)
+        result = edit.cure_afflictions(original)
+        self.assertEqual(result.cured, (("burns", 1), ("hypothermia", 1), ("sprained-wrist", 1)))
+        self.assertEqual(result.data, afflictions_save(hypothermia=True, burns=True, wrists=1, burns_first=True,
+                                                       cured=EVERY_KIND))
+
+    def test_the_lists_of_a_record_are_emptied_in_the_order_the_record_holds_them(self) -> None:
+        def pain(cases: int) -> Dict[str, JsonValue]:
+            return {"m_SprainPainSerialized": NestedJson({
+                "m_EndTimes": [Number("14.8732967")] * cases, "m_Causes": ["GAMEPLAY_Fall"] * cases,
+                "m_Other": [Number("1")], "m_Locations": [Number("5")] * cases})}
+
+        original = afflictions_save(records=pain(1))
+        result = edit.cure_afflictions(original)
+        self.assertEqual(result.data, afflictions_save(records=pain(0)))
+        self.assertEqual([path.rsplit(" > ", 1)[1] for path, _, _ in slot_differences(original, result.data)],
+                         ["m_EndTimes", "m_Causes", "m_Locations"])
+
+    def test_a_save_without_a_case_is_refused(self) -> None:
+        message = ("there is nothing to cure: this save holds no hypothermia, sprain-pain, sprained-ankle, "
+                   "sprained-wrist or burns")
+        self.assertEqual(self.refusal(afflictions_save()), message)
+        self.assertEqual(self.refusal(afflictions_save(hypothermia=False, burns=False)), message)
+
+    def test_a_cured_save_has_nothing_left_to_cure(self) -> None:
+        cured = edit.cure_afflictions(afflictions_save(hypothermia=True, wrists=2)).data
+        self.assertIn("there is nothing to cure", self.refusal(cured))
+
+    def test_one_kind_that_cannot_be_read_stops_the_whole_cure(self) -> None:
+        broken = {"m_SprainedWristSerialized": NestedJson({"m_Locations": [Number("3")]})}
+        self.assertEqual(self.refusal(afflictions_save(hypothermia=True, records=broken)),
+                         "sprained-wrist (m_SprainedWristSerialized) is not stored the way this tool expects, "
+                         "so nothing is cured")
+        self.assertEqual(self.refusal(afflictions_save(hypothermia=Number("1"), burns="yes", wrists=1)),
+                         "hypothermia (m_HypothermiaSerialized), burns (m_BurnsSerialized) are not stored the "
+                         "way this tool expects, so nothing is cured")
+        # Also when nothing else needs a cure.
+        self.assertIn("so nothing is cured", self.refusal(afflictions_save(records=broken)))
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = afflictions_save(hypothermia=True, burns=True, pain=1, ankles=1, wrists=2)
+        kept = bytes(original)
+        edit.cure_afflictions(original)
+        self.assertEqual(original, kept)
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        self.assertIn("does not pass the exact rebuild check", self.refusal(b"not a save"))
+
+    def caught(self, wrong: bytes) -> str:
+        """What the tool says when the encoder hands back wrong for a cure of hypothermia and two wrists."""
+        meant = afflictions_save(hypothermia=True, wrists=2, cured=EVERY_KIND)
+        with encoding_as(meant, wrong):
+            with self.assertRaises(EditError) as refused:
+                edit.cure_afflictions(afflictions_save(hypothermia=True, wrists=2))
+        return str(refused.exception)
+
+    def test_a_cure_that_was_not_written_is_caught(self) -> None:
+        message = self.caught(afflictions_save(hypothermia=True, wrists=2, cured=("sprained-wrist",)))
+        self.assertIn("did not change exactly the 6 values asked for", message)
+        self.assertIn("1 asked for and not made (m_Dict > global > m_HypothermiaSerialized > m_Active: true -> "
+                      "false)", message)
+
+    def test_a_list_that_still_holds_a_case_is_caught(self) -> None:
+        message = self.caught(afflictions_save(hypothermia=True, wrists=1, cured=("hypothermia",)))
+        self.assertIn("did not change exactly the 6 values asked for", message)
+        self.assertIn("m_SprainedWristSerialized > m_CausesLocIDs: 2 items -> 1 items", message)
+
+    def test_one_list_left_as_it_was_is_caught(self) -> None:
+        left = {"m_SprainedWristSerialized": NestedJson({
+            "m_CausesLocIDs": [], "m_Locations": [Number("3"), Number("5")], "m_ElapsedHoursList": [],
+            "m_DurationHoursList": [], "m_ElapsedRestList": []})}
+        message = self.caught(afflictions_save(hypothermia=True, cured=("hypothermia",), records=left))
+        self.assertIn("1 asked for and not made (m_Dict > global > m_SprainedWristSerialized > m_Locations: "
+                      "2 items -> 0 items)", message)
+
+    def test_a_switch_taken_out_of_its_record_is_caught(self) -> None:
+        message = self.caught(afflictions_save(wrists=2, cured=("sprained-wrist",)))
+        self.assertIn("m_HypothermiaSerialized: fields m_Active, m_ElapsedWarmTime, m_CauseLocID -> fields "
+                      "m_ElapsedWarmTime, m_CauseLocID", message)
+
+    def test_a_change_to_what_else_a_record_holds_is_caught(self) -> None:
+        changed = {"m_HypothermiaSerialized": NestedJson({
+            "m_Active": False, "m_ElapsedWarmTime": Number("0.0"), "m_CauseLocID": "GAMEPLAY_ColdWeather"})}
+        message = self.caught(afflictions_save(wrists=2, cured=("sprained-wrist",), records=changed))
+        self.assertIn("1 not asked for (m_Dict > global > m_HypothermiaSerialized > m_ElapsedWarmTime: "
+                      "8.781072 -> 0.0)", message)
+
+    def test_an_affliction_the_tool_does_not_read_that_changed_is_caught(self) -> None:
+        for name, records, change in (
+                ("food poisoning", {"m_FoodPoisoningSerialized": NestedJson(
+                    {"m_Active": False, "m_CauseLocID": "GAMEPLAY_TaintedFood"})},
+                 "m_FoodPoisoningSerialized > m_Active: true -> false"),
+                ("frostbite", {"m_FrostbiteSerialized": NestedJson({
+                    "m_LocationsWithActiveFrostbite": [], "m_LocationsWithFrostbiteRisk": [],
+                    "m_LocationsCurrentFrostbiteDamage": [Number("0.0")] * 12})},
+                 "m_FrostbiteSerialized > m_LocationsWithActiveFrostbite: 1 items -> 0 items")):
+            with self.subTest(name):
+                message = self.caught(afflictions_save(hypothermia=True, wrists=2, cured=EVERY_KIND,
+                                                       records=records))
+                self.assertIn(f"1 not asked for (m_Dict > global > {change})", message)
+
+
 class NewFileTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -2984,7 +3314,7 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("Untested", out)
         self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds",
                                                              "repair-all", "remove-item", "copy-item",
-                                                             "set-player", "set-skill"}))
+                                                             "set-player", "set-skill", "cure"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -3731,8 +4061,136 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertIn("Not found", err)
 
+    def test_afflictions_lists_the_five_kinds(self) -> None:
+        self.save.write_bytes(afflictions_save(hypothermia=True, pain=1, wrists=2))
+        before = self.snapshot()
+        code, out, err = self.run_command("afflictions", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines(), [
+            "affliction      cases  in the save",
+            "hypothermia         1  m_HypothermiaSerialized",
+            "sprain-pain         1  m_SprainPainSerialized",
+            "sprained-ankle      0  m_SprainedAnkleSerialized",
+            "sprained-wrist      2  m_SprainedWristSerialized",
+            "burns               0  m_BurnsSerialized",
+            "4 cases of these 5 kinds of affliction in sandbox15.",
+            "A save can hold other afflictions, such as frostbite or food poisoning. This tool does not read "
+            "them.",
+        ])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_afflictions_counts_one_case_as_one_case(self) -> None:
+        self.save.write_bytes(afflictions_save(burns=True))
+        code, out, err = self.run_command("afflictions", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[6], "1 case of these 5 kinds of affliction in sandbox15.")
+
+    def test_afflictions_marks_a_kind_it_cannot_read(self) -> None:
+        self.save.write_bytes(afflictions_save(wrists=1, records={"m_SprainPainSerialized": None}))
+        code, out, err = self.run_command("afflictions", str(self.save))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[2], "sprain-pain            cannot be read: m_SprainPainSerialized "
+                                              "is not stored the way this tool expects")
+        self.assertEqual(out.splitlines()[6], "1 case of these 5 kinds of affliction in sandbox15.")
+
+    def test_afflictions_on_something_that_is_no_save(self) -> None:
+        self.save.write_bytes(b"not a save")
+        code, out, err = self.run_command("afflictions", str(self.save))
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Refused:", err)
+        code, out, err = self.run_command("afflictions", str(self.folder / "sandbox99"))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
+    def test_cure_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(afflictions_save(hypothermia=True, pain=1, wrists=2))
+        before = self.snapshot()
+        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(),
+                         afflictions_save(hypothermia=True, pain=1, wrists=2, cured=EVERY_KIND))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], f"Save:     sandbox15, {len(self.save.read_bytes()):,} bytes, passes the "
+                                   "exact rebuild check")
+        self.assertEqual(lines[1:6], [
+            "Cured:    hypothermia, 1 case (m_HypothermiaSerialized: m_Active true -> false)",
+            "Cured:    sprain-pain, 1 case (m_SprainPainSerialized: 3 lists emptied)",
+            "Cured:    sprained-wrist, 2 cases (m_SprainedWristSerialized: 5 lists emptied)",
+            "Checked:  the edited save differs from the original in exactly these 9 values",
+            "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
+        ])
+        self.assertEqual(lines[6], "Untested: no save changed by cure has been loaded in the game yet. Try it "
+                                   "on a save you can afford to lose")
+        self.assertEqual(lines[7], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[8], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[9:], ["sandbox15 itself was not changed."])
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_cure_of_one_switch_says_one_value(self) -> None:
+        self.save.write_bytes(afflictions_save(burns=True))
+        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), afflictions_save(burns=True, cured=("burns",)))
+        self.assertEqual(out.splitlines()[1:3], [
+            "Cured:    burns, 1 case (m_BurnsSerialized: m_Active true -> false)",
+            "Checked:  the edited save differs from the original in exactly this one value",
+        ])
+
+    def test_cure_of_one_kind_with_lists_counts_each_list(self) -> None:
+        self.save.write_bytes(afflictions_save(wrists=1))
+        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), afflictions_save(wrists=1, cured=("sprained-wrist",)))
+        self.assertEqual(out.splitlines()[1:3], [
+            "Cured:    sprained-wrist, 1 case (m_SprainedWristSerialized: 5 lists emptied)",
+            "Checked:  the edited save differs from the original in exactly these 5 values",
+        ])
+
+    def test_cure_refusals_write_nothing(self) -> None:
+        existing = self.folder / "taken.edited"
+        existing.write_bytes(b"already here")
+        broken = {"m_SprainedAnkleSerialized": NestedJson({"m_Locations": []})}
+        cases = {
+            "nothing to cure": (afflictions_save(), self.out, "there is nothing to cure: this save holds no "
+                                                              "hypothermia, sprain-pain, sprained-ankle, "
+                                                              "sprained-wrist or burns"),
+            "a kind that cannot be read": (afflictions_save(burns=True, records=broken), self.out,
+                                           "sprained-ankle (m_SprainedAnkleSerialized) is not stored the way "
+                                           "this tool expects, so nothing is cured"),
+            "output exists": (afflictions_save(burns=True), existing, "already exists"),
+        }
+        for name, (save, out_file, message) in cases.items():
+            with self.subTest(name):
+                self.save.write_bytes(save)
+                before = self.snapshot()
+                code, printed, err = self.run_command("cure", str(self.save), "--out", str(out_file))
+                self.assertEqual(code, 1)
+                self.assertIn("Refused:", err)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(printed, "")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(existing.read_bytes(), b"already here")
+                self.assertFalse(self.out.exists())
+
+    def test_cure_checks_the_output_path_before_any_edit_work(self) -> None:
+        self.save.write_bytes(afflictions_save(burns=True))
+        with mock.patch.object(edit, "cure_afflictions") as attempted:
+            code, _, _ = self.run_command("cure", str(self.save), "--out", str(self.folder / "sandbox16"))
+        self.assertEqual(code, 1)
+        attempted.assert_not_called()
+
+    def test_cure_on_a_missing_save_is_a_usage_error(self) -> None:
+        code, out, err = self.run_command("cure", str(self.folder / "sandbox99"), "--out", str(self.out))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)], ["repair-all", str(self.save)],
+                          ["cure", str(self.save)],
+                          ["cure", str(self.save), "--only", "burns", "--out", str(self.out)],
                           ["set-skill", str(self.save), "--skill", "cooking", "--out", str(self.out)],
                           ["set-skill", str(self.save), "--points", "5", "--out", str(self.out)],
                           ["set-skill", str(self.save), "--skill", "cooking", "--points", "5"],
@@ -4166,6 +4624,42 @@ class RealSaveTests(unittest.TestCase):
                     after = edit.list_skills(codec.decode_save(result.data))
                     self.assertEqual(after, [Skill(skill.name, skill.record, str(points), points)
                                              if skill is target else skill for skill in before])
+
+    def test_the_afflictions_can_be_read_in_every_real_save(self) -> None:
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            listed = edit.list_afflictions(codec.decode_save(path.read_bytes()))
+            self.assertEqual([(kind.name, kind.record) for kind in listed],
+                             [(name, kind.record) for name, kind in edit.AFFLICTIONS.items()])
+            for kind in listed:
+                with self.subTest(save=path.name, affliction=kind.name):
+                    self.assertIsNotNone(kind.cases)
+
+    def test_every_real_save_with_an_affliction_can_be_cured(self) -> None:
+        """In memory only. No file is written. A save without a case must be refused."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.list_afflictions(codec.decode_save(original))
+                held = {kind.name: kind.cases for kind in before if kind.cases}
+                if not held:
+                    with self.assertRaises(EditError) as refused:
+                        edit.cure_afflictions(original)
+                    self.assertIn("there is nothing to cure", str(refused.exception))
+                    continue
+                result = edit.cure_afflictions(original)
+                self.assertEqual(dict(result.cured), held)
+                self.assertEqual(result.changes, sum(len(edit.AFFLICTIONS[name].lists) or 1 for name in held))
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                after = edit.list_afflictions(codec.decode_save(result.data))
+                self.assertEqual([(kind.name, kind.cases) for kind in after],
+                                 [(kind.name, 0) for kind in before])
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])

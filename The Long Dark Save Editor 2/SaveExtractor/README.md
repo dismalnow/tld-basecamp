@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold. Or the points of one skill |
+| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold. Or the points of one skill. Or an end to hypothermia, sprains and burns |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -460,8 +460,9 @@ Three checks stand between an edit and a written file. If one fails, nothing is 
 1. The original must pass `tld_save_codec.py verify`.
 2. The edited save, decoded again, must differ from the original in exactly what was asked
    for: one value, for `repair-all` one condition for each repaired item, for `remove-item`
-   one inventory entry less, for `copy-item` one more, and for `set-player` one value for
-   each option. Every other entry must be byte for byte unchanged.
+   one inventory entry less, for `copy-item` one more, for `set-player` one value for each
+   option, and for `cure` the values that end each case. Every other entry must be byte for
+   byte unchanged.
 3. The new file is read back and compared with what was meant to be written.
 
 The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
@@ -669,6 +670,76 @@ Things to know about skills:
 - The limit of 9999 only catches a slip of the hand. The highest number in the 14 real
   saves is 264.
 
+## Cure afflictions
+
+`tld_save_edit.py` also ends afflictions. It reads five kinds: hypothermia, sprain pain,
+sprained ankles, sprained wrists and burns. `cure` ends every case of those five that the
+save holds. The save you name is only read, the result goes to a new file, and the three
+checks above stand in between.
+
+Not tested in the game yet: nobody has loaded a save changed by `cure`. Try it on a save
+you can afford to lose.
+
+```powershell
+$save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox10"
+python tld_save_edit.py afflictions $save
+python tld_save_edit.py cure $save --out "$env:TEMP\sandbox10.edited"
+```
+
+`afflictions` lists the five kinds, and how many cases of each the save holds:
+
+```text
+affliction      cases  in the save
+hypothermia         0  m_HypothermiaSerialized
+sprain-pain         1  m_SprainPainSerialized
+sprained-ankle      0  m_SprainedAnkleSerialized
+sprained-wrist      2  m_SprainedWristSerialized
+burns               0  m_BurnsSerialized
+3 cases of these 5 kinds of affliction in sandbox10.
+A save can hold other afflictions, such as frostbite or food poisoning. This tool does not read them.
+```
+
+`cure` takes `--out` and nothing else:
+
+```text
+Save:     sandbox10, 703,636 bytes, passes the exact rebuild check
+Cured:    sprain-pain, 1 case (m_SprainPainSerialized: 3 lists emptied)
+Cured:    sprained-wrist, 2 cases (m_SprainedWristSerialized: 5 lists emptied)
+Checked:  the edited save differs from the original in exactly these 8 values
+Checked:  6 of 7 entries are byte for byte unchanged (all except global)
+Untested: no save changed by cure has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox10.edited, 703,596 bytes
+SHA-256:  a7b82252f4ad9c63858899a31f866df393dedc81fc5d7f01ad9447d8e8dd7560
+sandbox10 itself was not changed.
+```
+
+Things to know about curing:
+
+- The save holds an affliction in one of two ways. Hypothermia and burns are there or they
+  are gone, and the switch `m_Active` says which. `cure` sets it from `true` to `false`.
+  Sprain pain and sprains can be there several times. Their record keeps several lists,
+  each with one item for every case, and `cure` empties those lists: three for sprain pain,
+  five for sprained ankles and for sprained wrists.
+- Everything else in a record stays: how long the hypothermia has lasted, whether a burn is
+  bandaged, the timers of the pain sounds. The game leaves the same things behind. One of
+  the 14 real saves holds what is left of hypothermia and of a burn that are over, with
+  every such field still in place and the switch gone.
+- The game leaves `m_Active` out of a record while it is off. `cure` writes `false`, as the
+  old C# editor does.
+- These five kinds are the ones that a real save has shown in use. Of the 14 real saves,
+  two hold hypothermia, one holds a burn, two hold sprained wrists and two hold sprain
+  pain. A sprained ankle is stored exactly like a sprained wrist, and no real save holds
+  one.
+- Other afflictions are neither read nor changed: frostbite, food poisoning, dysentery,
+  infections, blood loss, broken ribs, cabin fever, parasites and the rest. `afflictions`
+  does not list them, so a save that shows no case here can still hold one of those. A kind
+  gets added once a real save shows how the game stores it in use.
+- The bonuses in the same part of the save, such as Well Fed, are left alone.
+- If one of the five kinds is not stored the way the tool expects, `cure` changes nothing
+  and names the kind. A save with nothing to cure is refused as well.
+- `cure` does not touch the bars. A character who is still freezing gets hypothermia again:
+  see `--warmth` under `set-player`.
+
 ## Put an edited save in place, or put a backup back
 
 `tld_save_apply.py` is the only tool here that changes a save file. `apply` puts a file
@@ -859,10 +930,11 @@ python -m unittest -v
 With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
 liquid, one amount of calories and the rounds of one weapon in each real save that has
 them, repair every real inventory, take one item out of each, copy one item in each, change
-the player's five values, and change the points of up to two skills in each. That happens
-in memory only: no file is written. The apply tests copy each real save into a temporary
-folder and work on the copy. The reader tests write each real save's CSV to a temporary
-folder. Your save folder is only read. Allow about ten minutes for the whole run.
+the player's five values, change the points of up to two skills in each, and cure each
+real save that holds one of the five afflictions. That happens in memory only: no file is
+written. The apply tests copy each real save into a temporary folder and work on the copy.
+The reader tests write each real save's CSV to a temporary folder. Your save folder is only
+read. Allow ten to fifteen minutes for the whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.
