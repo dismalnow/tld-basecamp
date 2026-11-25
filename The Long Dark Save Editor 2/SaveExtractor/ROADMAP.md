@@ -32,7 +32,8 @@ change finishes or advances an item, update this file in the same pull request.
 |---|---|
 | Liters: the liquid an inventory item holds | Built (pull request 9). Not tested in game |
 | Calories of a food item | Built (pull request 10). Not tested in game |
-| Rounds in a weapon | Not started |
+| Rounds in a weapon | Built (pull request 11). Not tested in game |
+| Film in the camera | Asked for by the owner on 2026-11-24. The camera uses the weapon record, and no save at hand has a loaded camera. Waiting for one |
 | Repair everything in the inventory | Not started |
 | Remove an item | Not started |
 | Add an item | Not started |
