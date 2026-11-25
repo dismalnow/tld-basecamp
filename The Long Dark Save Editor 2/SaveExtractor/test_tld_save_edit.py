@@ -1201,6 +1201,235 @@ class SingleChangeProofTests(unittest.TestCase):
             self.assert_refused(doctored, "entries other than global changed: global, LakeRegion")
 
 
+class SeveralChangesProofTests(unittest.TestCase):
+    """The same check, for an edit that changes several values."""
+
+    def setUp(self) -> None:
+        self.original = build_save()
+        self.expected = [(condition_path(1), "0.75", "1.0"), (condition_path(2), "0.5", "1.0")]
+
+    def refusal(self, doctored: bytes) -> str:
+        with self.assertRaises(EditError) as caught:
+            edit._prove_changes(self.original, doctored, self.expected)
+        return str(caught.exception)
+
+    def with_conditions(self, changes: Dict[int, str]) -> bytes:
+        items: Sequence[ItemSpec] = DEFAULT_ITEMS
+        for entry, condition in changes.items():
+            items = with_condition(items, entry, condition)
+        return build_save(items)
+
+    def test_the_intended_changes_alone_pass(self) -> None:
+        good = self.with_conditions({1: "1.0", 2: "1.0"})
+        self.assertEqual(edit._prove_changes(self.original, good, self.expected), (3, 2))
+
+    def test_a_change_that_was_not_made_is_named(self) -> None:
+        message = self.refusal(self.with_conditions({1: "1.0"}))
+        self.assertIn("did not change exactly the 2 values asked for. Found 1 difference: "
+                      "1 asked for and not made (", message)
+        self.assertIn("m_SerializedItems[2] > m_SerializedGear > m_NormalizedCondition: 0.5 -> 1.0)", message)
+        self.assertNotIn("not asked for (", message)
+
+    def test_a_change_that_was_not_asked_for_is_named(self) -> None:
+        message = self.refusal(self.with_conditions({1: "1.0", 2: "1.0", 3: "1.0"}))
+        self.assertIn("Found 3 differences: 1 not asked for (", message)
+        self.assertIn("m_SerializedItems[3] > m_SerializedGear > m_NormalizedCondition: 0.25 -> 1.0)", message)
+        self.assertNotIn("asked for and not made", message)
+
+    def test_a_wrong_new_value_counts_as_both(self) -> None:
+        message = self.refusal(self.with_conditions({1: "1.0", 2: "0.9"}))
+        self.assertIn("Found 2 differences: 1 not asked for (", message)
+        self.assertIn("0.5 -> 0.9), 1 asked for and not made (", message)
+
+    def test_no_change_at_all_is_refused(self) -> None:
+        self.assertIn("Found 0 differences: 2 asked for and not made", self.refusal(self.original))
+
+    def test_the_values_are_expected_in_save_order(self) -> None:
+        good = self.with_conditions({1: "1.0", 2: "1.0"})
+        with self.assertRaises(EditError) as caught:
+            edit._prove_changes(self.original, good, list(reversed(self.expected)))
+        self.assertIn("Found 2 differences: the same values in another order", str(caught.exception))
+
+    def test_a_result_that_does_not_rebuild_exactly_is_refused(self) -> None:
+        self.assertIn("does not rebuild exactly", self.refusal(b"\xff\xff\xff"))
+
+
+def repair_save(repaired: Sequence[int] = ()) -> bytes:
+    """A save with items below 100%, items at 100%, and items that a repair leaves alone.
+
+    A repair changes entries 1, 2, 3, 16, 18, 19 and 22. Entries 17, 20, 21 and 23 are torches
+    and flares that have burned.
+
+    The entries named in repaired are built at 100%.
+    """
+    specs: List[ItemSpec] = list(DEFAULT_ITEMS) + [
+        ("GEAR_FlareA", None, "0.0"),             # 5: ruined
+        ("GEAR_Knife", None, "0.4"),              # 6: marked worn out below
+        ("GEAR_Prybar", None, "75.0"),            # 7 to 10: conditions in forms the tool does not change
+        ("GEAR_Hammer", None, "-0.5"),
+        ("GEAR_Hacksaw", None, "7.5E-01"),
+        ("GEAR_Hook", None, "NaN"),
+        ("GEAR_Line", None, "0.75"),              # 11: its condition becomes text below
+        ("GEAR_Tinder", None, "0.75"),            # 12: loses its gear record below
+        ("GEAR_Arrow", None, "1"),                # 13 and 14: at 100% in other forms
+        ("GEAR_Bow", None, "0.99999999"),
+        ("GEAR_Stone", None, "0.5"),              # 15: loses its name below
+        ("GEAR_Rope", "2", "0.9"),                # 16: below 100%, and a stack
+        ("GEAR_Torch", None, "0.404903769"),      # 17: a torch that has burned, as a real save holds one
+        ("GEAR_Torch", None, "0.8"),              # 18: a fresh torch below 100%
+        ("GEAR_FlareA", None, "0.7"),             # 19: a fresh flare, in the form the C# editor writes
+        ("GEAR_BlueFlare", None, "0.6"),          # 20: a flare that is burning
+        ("GEAR_Torch", None, "0.5"),              # 21: a burn time that is no number
+        ("GEAR_Torch", None, "0.6"),              # 22: the state Fresh, spelled out
+        ("GEAR_Torch", None, "0.3"),              # 23: a torch record that is no record
+        ("GEAR_Torch", None, "1.0"),              # 24: a torch that has burned and is at 100% all the same
+    ]
+    for entry in repaired:
+        specs[entry] = (specs[entry][0], specs[entry][1], "1.0")
+    items: List[JsonValue] = [item(*spec) for spec in specs]
+    burned = NestedJson({"m_HoursPlayed": Number("301.523438"), "m_StateProxy": "Extinguished",
+                         "m_ElapsedBurnMinutesProxy": Number("53.5586624")})
+    lights: Dict[int, Tuple[str, JsonValue]] = {
+        17: ("m_TorchItemSerialized", burned),
+        18: ("m_TorchItemSerialized", NestedJson({"m_HoursPlayed": Number("35.7810822")})),
+        19: ("m_FlareItemSerialized", NestedJson({"m_HoursPlayed": Number("158.37413"), "m_StateProxy": None,
+                                                  "m_ElapsedBurnMinutesProxy": Number("0.0")})),
+        20: ("m_FlareItemSerialized", NestedJson({"m_StateProxy": "Burning",
+                                                  "m_ElapsedBurnMinutesProxy": Number("0.0")})),
+        21: ("m_TorchItemSerialized", NestedJson({"m_ElapsedBurnMinutesProxy": "12"})),
+        22: ("m_TorchItemSerialized", NestedJson({"m_StateProxy": "Fresh"})),
+        23: ("m_TorchItemSerialized", "burned"),
+        24: ("m_TorchItemSerialized", NestedJson({"m_StateProxy": "Extinguished",
+                                                  "m_ElapsedBurnMinutesProxy": Number("30.0")})),
+    }
+    for entry, (field, record) in lights.items():
+        items[entry]["m_SerializedGear"].value[field] = record                # type: ignore[index,union-attr]
+    items[6]["m_SerializedGear"].value["m_WornOut"] = True                  # type: ignore[index,union-attr]
+    items[11]["m_SerializedGear"].value["m_NormalizedCondition"] = "0.75"   # type: ignore[index,union-attr]
+    items[12]["m_SerializedGear"] = None                                    # type: ignore[index]
+    del items[15]["m_PrefabName"]                                           # type: ignore[union-attr]
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": items, "m_QuickSelectInstanceIDs": []}
+    return build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory)})
+
+
+# The entries of repair_save() that a repair changes.
+REPAIRED = (1, 2, 3, 16, 18, 19, 22)
+
+
+def encoding_as(meant: bytes, wrong: bytes):
+    """Fault injection: an encoder that hands back wrong where the edit meant to write meant."""
+    real_encode = codec.encode_save
+
+    def encode_wrongly(save: DecodedSave) -> bytes:
+        encoded = real_encode(save)
+        return wrong if encoded == meant else encoded
+
+    return mock.patch.object(codec, "encode_save", side_effect=encode_wrongly)
+
+
+class RepairTests(unittest.TestCase):
+    def test_every_item_below_full_is_set_to_full(self) -> None:
+        original = repair_save()
+        result = edit.repair_inventory(original)
+        self.assertEqual(result.repaired, ((1, "GEAR_Hatchet", "0.75"), (2, "GEAR_BottleAntibiotics", "0.5"),
+                                           (3, "GEAR_BottleAntibiotics", "0.25"), (16, "GEAR_Rope", "0.9"),
+                                           (18, "GEAR_Torch", "0.8"), (19, "GEAR_FlareA", "0.7"),
+                                           (22, "GEAR_Torch", "0.6")))
+        self.assertEqual((result.full, result.ruined, result.burned, result.unreadable), (5, 2, 4, 7))
+        # Built independently, with those seven conditions at 100%.
+        self.assertEqual(result.data, repair_save(repaired=REPAIRED))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(condition_path(1), "0.75", "1.0"), (condition_path(2), "0.5", "1.0"),
+                                 (condition_path(3), "0.25", "1.0"), (condition_path(16), "0.9", "1.0"),
+                                 (condition_path(18), "0.8", "1.0"), (condition_path(19), "0.7", "1.0"),
+                                 (condition_path(22), "0.6", "1.0")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_it_repairs_what_set_condition_accepts_apart_from_burned_torches_and_flares(self) -> None:
+        original = repair_save()
+        repaired = {entry for entry, _, _ in edit.repair_inventory(original).repaired}
+        for entry, one in enumerate(edit._inventory_items(codec.decode_save(original))):
+            prefab = edit._prefab_of(one)
+            with self.subTest(entry=entry):
+                if prefab is None:
+                    self.assertNotIn(entry, repaired)
+                    continue
+                try:
+                    edit.set_item_condition(original, prefab, 100, entry=entry)
+                    accepted = True
+                except EditError:
+                    accepted = False
+                self.assertEqual(entry in repaired, accepted and entry not in (17, 20, 21, 23))
+
+    def test_a_stack_keeps_its_count(self) -> None:
+        result = edit.repair_inventory(repair_save())
+        self.assertEqual(edit.list_items(codec.decode_save(result.data))[15],
+                         Item(16, "GEAR_Rope", 2, 100.0))
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = repair_save()
+        kept = bytes(original)
+        edit.repair_inventory(original)
+        self.assertEqual(original, kept)
+
+    def test_a_second_repair_finds_nothing_to_change(self) -> None:
+        once = edit.repair_inventory(repair_save()).data
+        with self.assertRaises(EditError) as refused:
+            edit.repair_inventory(once)
+        self.assertIn("there is nothing to repair in the inventory: 12 at 100%, 2 ruined, 4 burned torches or "
+                      "flares, 7 with a condition this tool does not change. Nothing to change",
+                      str(refused.exception))
+
+    def test_an_inventory_at_full_is_refused(self) -> None:
+        full = build_save([(prefab, count, "1.0") for prefab, count, _ in DEFAULT_ITEMS])
+        with self.assertRaises(EditError) as refused:
+            edit.repair_inventory(full)
+        self.assertIn("5 at 100%, 0 ruined, 0 burned torches or flares, 0 with a condition this tool does not "
+                      "change", str(refused.exception))
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.repair_inventory(b"not a save")
+        self.assertIn("does not pass the exact rebuild check", str(refused.exception))
+
+    def test_a_repair_that_misses_an_item_is_caught(self) -> None:
+        with encoding_as(repair_save(repaired=REPAIRED), repair_save(repaired=REPAIRED[:-1])):
+            with self.assertRaises(EditError) as caught:
+                edit.repair_inventory(repair_save())
+        self.assertIn("did not change exactly the 7 values asked for. Found 6 differences: "
+                      "1 asked for and not made", str(caught.exception))
+        self.assertIn("m_SerializedItems[22]", str(caught.exception))
+
+    def test_a_repair_that_touches_a_ruined_item_is_caught(self) -> None:
+        with encoding_as(repair_save(repaired=REPAIRED), repair_save(repaired=REPAIRED + (5,))):
+            with self.assertRaises(EditError) as caught:
+                edit.repair_inventory(repair_save())
+        self.assertIn("Found 8 differences: 1 not asked for (", str(caught.exception))
+        self.assertIn("m_SerializedItems[5] > m_SerializedGear > m_NormalizedCondition: 0.0 -> 1.0",
+                      str(caught.exception))
+
+    def test_a_repair_that_touches_a_burned_torch_is_caught(self) -> None:
+        with encoding_as(repair_save(repaired=REPAIRED), repair_save(repaired=REPAIRED + (17,))):
+            with self.assertRaises(EditError) as caught:
+                edit.repair_inventory(repair_save())
+        self.assertIn("Found 8 differences: 1 not asked for (", str(caught.exception))
+        self.assertIn("m_SerializedItems[17] > m_SerializedGear > m_NormalizedCondition: 0.404903769 -> 1.0",
+                      str(caught.exception))
+
+    def test_a_repair_that_also_changes_a_count_is_caught(self) -> None:
+        meant = repair_save(repaired=REPAIRED)
+        save = codec.decode_save(meant)
+        stack = edit._inventory_items(save)[16]["m_SerializedGear"].value["m_StackableItemSerialized"]
+        stack.value["m_UnitsProxy"] = Number("3")
+        wrong = codec.encode_save(save)
+        with encoding_as(meant, wrong):
+            with self.assertRaises(EditError) as caught:
+                edit.repair_inventory(repair_save())
+        self.assertIn("1 not asked for (", str(caught.exception))
+        self.assertIn("m_UnitsProxy: 2 -> 3", str(caught.exception))
+
+
 class NewFileTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -1505,7 +1734,8 @@ class CommandTests(unittest.TestCase):
                                         "--count", "40", "--out", str(self.out))
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
-        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds"}))
+        self.assertEqual(edit.NOT_TESTED_IN_GAME,
+                         frozenset({"set-liters", "set-calories", "set-rounds", "repair-all"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -1736,8 +1966,82 @@ class CommandTests(unittest.TestCase):
                 self.assertIn("--rounds", err.getvalue())
         self.assertFalse(self.out.exists())
 
+    def test_repair_all_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(repair_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("repair-all", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), repair_save(repaired=REPAIRED))
+        self.assertIn("Change:   condition set to 100% for 7 of the 25 items in the inventory\n", out)
+        self.assertIn("Left:     5 at 100% already, 2 ruined, 4 burned torches or flares, 7 with a condition "
+                      "this tool does not change\n", out)
+        self.assertIn("Checked:  the edited save differs from the original in exactly these 7 values\n", out)
+        self.assertIn("2 of 3 entries are byte for byte unchanged", out)
+        self.assertIn("Untested: no save changed by repair-all has been loaded in the game yet", out)
+        self.assertNotIn("Item:", out)
+        self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_repair_all_of_one_item_says_one_value(self) -> None:
+        self.save.write_bytes(build_save(with_condition(with_condition(DEFAULT_ITEMS, 2, "1.0"), 3, "1.0")))
+        code, out, _ = self.run_command("repair-all", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("Change:   condition set to 100% for 1 of the 5 items in the inventory\n", out)
+        self.assertIn("Left:     4 at 100% already, 0 ruined, 0 burned torches or flares, 0 with a condition "
+                      "this tool does not change\n", out)
+        self.assertIn("Checked:  the edited save differs from the original in exactly this one value\n", out)
+        self.assertEqual(self.out.read_bytes(), build_save([(prefab, count, "1.0")
+                                                            for prefab, count, _ in DEFAULT_ITEMS]))
+
+    def test_repair_all_refusals_write_nothing(self) -> None:
+        existing = self.folder / "taken.edited"
+        existing.write_bytes(b"already here")
+        full = self.folder / "full"
+        full.write_bytes(build_save([(prefab, count, "1.0") for prefab, count, _ in DEFAULT_ITEMS]))
+        cases = {
+            "nothing to repair": ([str(full), "--out", str(self.out)],
+                                  "there is nothing to repair in the inventory"),
+            "output exists": ([str(self.save), "--out", str(existing)], "already exists"),
+            "output named like a live save": ([str(self.save), "--out", str(self.folder / "sandbox16")],
+                                              "is named like a live save"),
+            "output folder missing": ([str(self.save), "--out", str(self.folder / "nowhere" / "x.edited")],
+                                      "does not exist"),
+        }
+        before = self.snapshot()
+        for name, (arguments, message) in cases.items():
+            with self.subTest(name):
+                code, out, err = self.run_command("repair-all", *arguments)
+                self.assertEqual(code, 1)
+                self.assertIn("Refused:", err)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(existing.read_bytes(), b"already here")
+
+    def test_repair_all_checks_the_output_path_before_any_edit_work(self) -> None:
+        with mock.patch.object(edit, "repair_inventory") as attempted:
+            code, _, _ = self.run_command("repair-all", str(self.save), "--out", str(self.folder / "sandbox16"))
+        self.assertEqual(code, 1)
+        attempted.assert_not_called()
+
+    def test_repair_all_on_a_missing_save_is_a_usage_error(self) -> None:
+        code, out, err = self.run_command("repair-all", str(self.folder / "sandbox99"), "--out", str(self.out))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+        self.assertFalse(self.out.exists())
+
+    def test_repair_all_takes_no_item(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                edit.main(["repair-all", str(self.save), "--item", "GEAR_Hatchet", "--out", str(self.out)])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertFalse(self.out.exists())
+
     def test_missing_options_are_a_usage_error(self) -> None:
-        for arguments in ([], ["set-count", str(self.save)],
+        for arguments in ([], ["set-count", str(self.save)], ["repair-all", str(self.save)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--out", str(self.out)],
                           ["set-liters", str(self.save), "--item", "GEAR_LampFuel", "--out", str(self.out)],
                           ["set-calories", str(self.save), "--item", "GEAR_MRE", "--out", str(self.out)],
@@ -1951,6 +2255,44 @@ class RealSaveTests(unittest.TestCase):
                     checked += 1
         if not checked:
             self.skipTest("no real save holds a weapon that this tool has a number for")
+
+    def test_every_real_inventory_can_be_repaired(self) -> None:
+        """In memory only. No file is written."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        repaired = 0
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                before = edit.list_items(codec.decode_save(original))
+                try:
+                    result = edit.repair_inventory(original)
+                except EditError as refused:
+                    self.assertIn("Nothing to change", str(refused))
+                    continue
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                decoded = codec.decode_save(result.data)
+                changed = {entry for entry, _, _ in result.repaired}
+                expected = [Item(one.entry, one.prefab, one.count,
+                                 100.0 if one.entry in changed else one.condition) for one in before]
+                self.assertEqual(edit.list_items(decoded), expected)
+                # Whatever is still below 100% is a torch or a flare that has burned, or something that
+                # set-condition refuses too.
+                items = edit._inventory_items(decoded)
+                left = 0
+                for one in expected:
+                    if one.condition != 100.0:
+                        gear = edit._gear_of(items[one.entry])
+                        if gear is None or not edit._has_burned(gear):
+                            with self.assertRaises(EditError):
+                                edit._editable_condition(items[one.entry], one.entry, one.prefab)
+                        left += 1
+                self.assertLessEqual(left, result.ruined + result.burned + result.unreadable)
+                repaired += 1
+        if not repaired:
+            self.skipTest("no real save has an inventory item below 100%")
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])

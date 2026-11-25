@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes one value in a save and writes the result to a new file: the count of an inventory stack, the condition of an inventory item, the liquid an inventory item holds, the calories left in a food item, or the rounds loaded in a weapon |
+| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -110,7 +110,8 @@ changelists 157357 to 189457 (v2.60).
 ## Change one value in the inventory
 
 `tld_save_edit.py` changes one value in a save and writes the result to a new file. The
-save you name is only read. Each command works on one item in the player's inventory.
+save you name is only read. Each command works on one item in the player's inventory,
+except `repair-all`, which works on all of them.
 
 | Command | What it changes | Tested in the game |
 |---|---|---|
@@ -119,6 +120,7 @@ save you name is only read. Each command works on one item in the player's inven
 | `set-liters` | The liquid an item holds | Not yet. Its own output says so |
 | `set-calories` | The calories left in a food item | Not yet. Its own output says so |
 | `set-rounds` | The rounds loaded in a rifle, a revolver or a distress pistol | Not yet. Its own output says so |
+| `repair-all` | The condition of every item below 100% | Not yet. Its own output says so |
 
 ### Count
 
@@ -316,13 +318,57 @@ Things to know about rounds:
   cameras in the 14 saves are empty, so what a loaded camera looks like in a save is not
   known yet. `set-rounds` refuses the camera, and its line has nothing under `holds`.
 
+### Repair everything
+
+Not tested in the game yet: nobody has loaded a save changed by `repair-all`. Try it on a
+save you can afford to lose.
+
+```powershell
+python tld_save_edit.py repair-all $save --out "$env:TEMP\sandbox15.edited"
+```
+
+`repair-all` sets the condition of every item in the inventory that is below 100% to 100%.
+It takes no item name. For each item it follows the rule of `set-condition`, and it leaves
+some items alone and counts them in its output.
+
+```text
+Save:     sandbox15, 585,798 bytes, passes the exact rebuild check
+Change:   condition set to 100% for 107 of the 443 items in the inventory
+Left:     336 at 100% already, 0 ruined, 0 burned torches or flares, 0 with a condition this tool does not change
+Checked:  the edited save differs from the original in exactly these 107 values
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by repair-all has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 584,124 bytes
+SHA-256:  e7671ec9ee53d914580856407e46484b5bbd29024503861a85021e962d2ab39e
+sandbox15 itself was not changed.
+```
+
+Things to know about `repair-all`:
+
+- It changes conditions and nothing else. The second check holds for all repaired items at
+  once: the edited save must differ from the original in exactly those conditions, each from
+  its old value to `1.0`, and in nothing else.
+- A ruined item is left alone, as `set-condition` leaves it alone. So is an item whose
+  condition is stored in a form the tool does not change.
+- A torch or a flare that has burned is left alone too. The save keeps its burn time next to
+  its condition, and in both burned torches in the real saves the condition is exactly what
+  is left of 90 minutes: a torch that burned 53.6 minutes is at 40.5%. What the game makes of
+  a full condition next to that burn time is not known. `set-condition` still changes such a
+  torch when you name it, and that is not tested in the game either. The C# editor's repair
+  sets every item to 100% and marks torches and flares as fresh.
+- Hit points are left alone, as with `set-condition`. The game works them out again from the
+  condition when it loads the save.
+- In 14 real saves the inventories hold 1,143 items: 657 at 100%, 484 that a repair changes,
+  and 2 burned torches. None is ruined.
+
 ### The checks
 
 Three checks stand between an edit and a written file. If one fails, nothing is left on disk.
 
 1. The original must pass `tld_save_codec.py verify`.
-2. The edited save, decoded again, must differ from the original in exactly the value asked
-   for, and every other entry must be byte for byte unchanged.
+2. The edited save, decoded again, must differ from the original in exactly what was asked
+   for: one value, or for `repair-all` one condition for each repaired item. Every other
+   entry must be byte for byte unchanged.
 3. The new file is read back and compared with what was meant to be written.
 
 The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
@@ -495,7 +541,7 @@ python -m unittest -v
 
 With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
 liquid, one amount of calories and the rounds of one weapon in each real save that has
-them. That happens in memory only: no file is written. The apply tests copy each real
+them, and repair every real inventory. That happens in memory only: no file is written. The apply tests copy each real
 save into a temporary folder and work on the copy. The reader tests write each real save's
 CSV to a temporary folder. Your save folder is only read. Allow about five minutes for the
 whole run.
