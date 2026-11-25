@@ -17,7 +17,7 @@ except the wiki helper, which needs the `requests` package.
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
-| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold. Or the points of one skill. Or an end to hypothermia, sprains and burns |
+| `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold. Or the points of one skill. Or an end to hypothermia, sprains and burns. Or the place where the character stands |
 | `test_tld_save_edit.py` | Tests for `tld_save_edit.py` |
 | `tld_save_apply.py` | Puts an edited file in place of the live save after a checked backup, and puts a backup back |
 | `test_tld_save_apply.py` | Tests for `tld_save_apply.py` |
@@ -460,9 +460,9 @@ Three checks stand between an edit and a written file. If one fails, nothing is 
 1. The original must pass `tld_save_codec.py verify`.
 2. The edited save, decoded again, must differ from the original in exactly what was asked
    for: one value, for `repair-all` one condition for each repaired item, for `remove-item`
-   one inventory entry less, for `copy-item` one more, for `set-player` one value for each
-   option, and for `cure` the values that end each case. Every other entry must be byte for
-   byte unchanged.
+   one inventory entry less, for `copy-item` one more, for `set-player` and `set-position`
+   one value for each option, and for `cure` the values that end each case. Every other
+   entry must be byte for byte unchanged.
 3. The new file is read back and compared with what was meant to be written.
 
 The new file must not exist yet, and it must not be named like a live save (`sandbox1`,
@@ -740,6 +740,75 @@ Things to know about curing:
 - `cure` does not touch the bars. A character who is still freezing gets hypothermia again:
   see `--warmth` under `set-player`.
 
+## Move the character
+
+`tld_save_edit.py` also moves the character inside the scene the save is in. The save you
+name is only read, the result goes to a new file, and the three checks above stand in
+between.
+
+Not tested in the game yet: nobody has loaded a save changed by `set-position`. Try it on a
+save you can afford to lose.
+
+```powershell
+$save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox15"
+python tld_save_edit.py position $save
+python tld_save_edit.py set-position $save --x -0.797 --y 0.0165060163 --z -1.38356638 --out "$env:TEMP\sandbox15.edited"
+```
+
+`position` prints the scene and the three numbers of the position:
+
+```text
+Scene:     GreyMothersHouseA
+Position:  x -1.464066, y -0.5301075, z -1.0880059
+Where the character stands in sandbox15. y is the height. The numbers count inside this scene only.
+```
+
+`set-position` takes one or more of `--x`, `--y` and `--z`:
+
+```text
+Save:     sandbox15, 585,798 bytes, passes the exact rebuild check
+Scene:    GreyMothersHouseA. It is not changed, and the numbers count inside it only
+Change:   x -1.464066 -> -0.797
+Change:   y -0.5301075 -> 0.0165060163
+Change:   z -1.0880059 -> -1.38356638
+Checked:  the edited save differs from the original in exactly these 3 values
+Checked:  7 of 8 entries are byte for byte unchanged (all except global)
+Untested: no save changed by set-position has been loaded in the game yet. Try it on a save you can afford to lose
+Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,824 bytes
+SHA-256:  627128049ec34383720290dc88df46e7ebebca5d15482e79e83b7f85c696719d
+sandbox15 itself was not changed.
+```
+
+Things to know about moving:
+
+- The tool does not know the ground, the walls or the floors. A spot inside a wall or under
+  the floor is written like any other. Take the numbers from a spot that is known to be
+  good: where the character stands in another save of the same scene, as `position` prints
+  it, or where an item lies, from the `x`, `y` and `z` columns of the reader's CSV. The
+  example above uses the spot where the character of another real save stands in the same
+  house.
+- The numbers count inside one scene. Every region and every building has numbers of its
+  own. The tool does not take the character to another scene.
+- Only the three numbers of `m_SaveGamePosition` change, which are the numbers the old C#
+  editor changes. Every one of the 14 real saves tells the game to put the character at
+  that position when it loads (`m_TeleportPlayerSaveGamePosition`).
+- The save keeps two more things about the place, and both are left alone. One is the
+  direction the character faces, `m_SaveGameRotation`. The other is
+  `m_PlayerInVehicleCameraPos`, which in all 14 real saves is the position with the height
+  of the eyes added to `y`: 1.75, or 0.83 in two saves. After a move it still holds the old
+  place. What the game makes of that is part of the in-game test.
+- A number that the save holds already stays as the game wrote it, and the output says
+  `Same`. The edit goes ahead when one or more of the other numbers changes.
+- A character in a vehicle, in a snow shelter or on a rope is not moved. `position` says so.
+  One of the 14 real saves has the character in a vehicle.
+- The numbers are written as 32-bit floats, the way the game writes them (checked against
+  41 of the 42 numbers in the 14 real saves). They may run from -100000 to 100000, and the
+  farthest in a real save is 1,980. A number closer to 0 than 0.0001 is refused, because the
+  game writes numbers that small with an exponent, as it did for the one number left of the
+  42. Use 0.
+- A number with a minus sign and an exponent can be taken for an option. Write it after an
+  equals sign: `--y=-1.1920929E-07`.
+
 ## Put an edited save in place, or put a backup back
 
 `tld_save_apply.py` is the only tool here that changes a save file. `apply` puts a file
@@ -930,11 +999,11 @@ python -m unittest -v
 With `TLD_SAVE_DIR` set, the edit tests also change one count, one condition, one amount of
 liquid, one amount of calories and the rounds of one weapon in each real save that has
 them, repair every real inventory, take one item out of each, copy one item in each, change
-the player's five values, change the points of up to two skills in each, and cure each
-real save that holds one of the five afflictions. That happens in memory only: no file is
-written. The apply tests copy each real save into a temporary folder and work on the copy.
-The reader tests write each real save's CSV to a temporary folder. Your save folder is only
-read. Allow ten to fifteen minutes for the whole run.
+the player's five values, change the points of up to two skills in each, cure each real
+save that holds one of the five afflictions, and move the character in each. That happens
+in memory only: no file is written. The apply tests copy each real save into a temporary
+folder and work on the copy. The reader tests write each real save's CSV to a temporary
+folder. Your save folder is only read. Allow ten to fifteen minutes for the whole run.
 
 The expected compressor output in the tests comes from the C# compressor in this
 repository, `Helpers\CLZF.cs`.
