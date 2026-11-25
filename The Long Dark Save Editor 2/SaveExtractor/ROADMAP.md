@@ -33,10 +33,10 @@ change finishes or advances an item, update this file in the same pull request.
 | Liters: the liquid an inventory item holds | Built (pull request 9). Not tested in game |
 | Calories of a food item | Built (pull request 10). Not tested in game |
 | Rounds in a weapon | Built (pull request 11). Not tested in game |
-| Film in the camera | Asked for by the owner on 2026-11-24. The camera uses the weapon record, and no save at hand has a loaded camera. Waiting for one |
+| Film in the camera | Decided by the owner on 2026-11-24: treat the camera like a gun, with three numbers: shots left, shots taken, and where the images are. The save keeps them in the camera's own list of rounds, in two photo counters, and in a photo list. All of these are empty in the 14 saves at hand, so this waits for a save with film loaded and photos taken |
 | Repair everything in the inventory | Built (pull request 12). Not tested in game. Torches and flares that have burned are left alone |
 | Remove an item | Built (pull request 13). Not tested in game |
-| Add an item | Not started |
+| Add an item | First step built (pull request 14): `copy-item` adds another one of an item the inventory holds. Not tested in game. An item the inventory does not hold is not started: it needs a record built for each kind of item, and it waits for the in-game results |
 
 ## What holds for every block
 

@@ -1613,6 +1613,222 @@ class RemoveTests(unittest.TestCase):
         self.assertIn("without entry 18: 17 items where 18 were expected", str(caught.exception))
 
 
+GUID = "3caf3e38-6044-4544-97b3-72c2273efa1f"
+
+
+def copy_save(copy_of: Optional[int] = None, number: str = "-5240390") -> bytes:
+    """A save whose inventory holds items that may be copied, and items that the tool does not copy.
+
+    copy_of builds the same save with a copy of that entry at the end, under the given instance number.
+    """
+    def worn(mark: JsonValue) -> NestedJson:
+        return NestedJson({"m_WearingProxy": mark})
+
+    def make(entry: int) -> Dict[str, JsonValue]:
+        # Built anew on every call, so a copy shares nothing with its source.
+        specs = (
+            ("GEAR_MRE", None, "-1001000", {"m_FoodItemSerialized": food_record("846.509155", "1750.0")}),
+            ("GEAR_WoodMatches", "23", "-1001002", {}),
+            ("GEAR_WoolSocks", None, "-1001004", {"m_ClothingItemSerialized": worn(True)}),
+            ("GEAR_WoolSocks", None, "1474360", {"m_ClothingItemSerialized": worn(False)}),
+            ("GEAR_WaterSupplyPotable", None, "-1001006",
+             {"m_WaterSupplySerialized": NestedJson({"m_VolumeProxy": Number("2000000000")})}),
+            ("GEAR_SprayPaintCan", None, "-1001008", {"m_ObjectGuidSerialized": GUID}),
+            ("GEAR_PostCard_ML_LakeOverlook", None, "-1001010",
+             {"m_MissionObjectSerialized": NestedJson({"m_Id": "GEAR_PostCard_ML_LakeOverlook_X_949.08"})}),
+            ("GEAR_Respirator", None, "-1001012", {"m_RespiratorSerialized": NestedJson(
+                {"AttachedCanister": {"m_InstanceIDProxy": Number("-584372")}})}),
+            ("GEAR_BedRoll", None, "-1001014", {"m_BedSerialized": NestedJson({"m_Guid": GUID.upper()})}),
+            ("GEAR_RecycledCan", None, "-1001016", {"m_CookingPotItemSerialized": NestedJson(
+                {"m_FireBeingUsedGUID": "", "m_GearItemBeingCookedGUID": ""})}),
+            ("GEAR_Knife", None, "12.5", {}),
+            ("GEAR_Tinder", None, None, {}),
+            ("GEAR_InsulatedFlask_A", None, "-1001020",
+             {"m_InsulatedFlaskSerialized": NestedJson({"m_SerializedItems": []})}),
+            ("GEAR_Scarf", None, "-1001022", {"m_ClothingItemSerialized": worn("yes")}),
+            ("GEAR_Hatchet", None, "-5240386", {}),
+            ("GEAR_InsulatedFlask_B", None, "-1001026", {"m_InsulatedFlaskSerialized": NestedJson(
+                {"m_SerializedItems": [{"m_PrefabName": "GEAR_CoffeeCup", "m_SerializedGear": NestedJson(
+                    {"m_InstanceIDProxy": Number("-1001030")})}]})}),
+            ("GEAR_BackerNote1B", None, "-1001028", {"m_MissionObjectSerialized": None,
+                                                     "m_ObjectGuidSerialized": None}),
+        )
+        prefab, count, identity, records = specs[entry]
+        made = item(prefab, count, "0.9")
+        if identity is None:
+            made["m_SerializedGear"] = None
+        else:
+            gear = made["m_SerializedGear"].value                             # type: ignore[union-attr]
+            gear["m_InstanceIDProxy"] = Number(identity)
+            gear.update(records)
+        return made
+
+    items: List[JsonValue] = [make(entry) for entry in range(17)]
+    if copy_of is not None:
+        extra = make(copy_of)
+        extra["m_SerializedGear"].value["m_InstanceIDProxy"] = Number(number)   # type: ignore[union-attr]
+        items.append(extra)
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": items,
+                                       "m_QuickSelectInstanceIDs": [Number("0") for _ in range(4)]}
+    return build_save(global_document={
+        "m_Inventory_Serialized": NestedJson(inventory),
+        "m_PlayerManagerSerialized": NestedJson({"m_ItemInHandsInstanceID": Number("-1001000")}),
+        "m_Unknown": NestedJson({"m_Taken": Number("-5240388")}),
+    })
+
+
+def numbered_save(numbers: Sequence[Optional[str]], elsewhere: Sequence[JsonValue] = ()) -> bytes:
+    """A save whose inventory items carry these instance numbers, and that holds other values elsewhere."""
+    items: List[JsonValue] = []
+    for number in numbers:
+        made = item("GEAR_Stone", None, "1.0")
+        if number is not None:
+            made["m_SerializedGear"].value["m_InstanceIDProxy"] = Number(number)   # type: ignore[union-attr]
+        items.append(made)
+    inventory: Dict[str, JsonValue] = {"m_SerializedItems": items, "m_QuickSelectInstanceIDs": []}
+    return build_save(global_document={"m_Inventory_Serialized": NestedJson(inventory),
+                                       "m_Unknown": NestedJson({"m_Values": list(elsewhere)})})
+
+
+class CopyTests(unittest.TestCase):
+    def test_adds_exactly_one_entry(self) -> None:
+        original = copy_save()
+        result = edit.copy_item(original, "GEAR_MRE")
+        self.assertEqual((result.prefab, result.source, result.entry, result.count), ("GEAR_MRE", 0, 17, None))
+        self.assertEqual((result.old_number, result.new_number), ("-1001000", "-5240390"))
+        # Built independently, with one more entry at the end.
+        self.assertEqual(result.data, copy_save(copy_of=0))
+        found = list(edit.differences(codec.decode_save(original).slot, codec.decode_save(result.data).slot))
+        self.assertEqual(found, [(ITEMS_PATH, "17 items", "18 items")])
+        self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
+        self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_a_stack_is_copied_with_its_count(self) -> None:
+        result = edit.copy_item(copy_save(), "GEAR_WoodMatches")
+        self.assertEqual((result.source, result.count), (1, 23))
+        self.assertEqual(result.data, copy_save(copy_of=1))
+
+    def test_items_that_may_be_copied(self) -> None:
+        for prefab, entry in (("GEAR_WoolSocks", 3), ("GEAR_RecycledCan", 9), ("GEAR_InsulatedFlask_A", 12),
+                              ("GEAR_Hatchet", 14), ("GEAR_BackerNote1B", 16)):
+            with self.subTest(prefab=prefab):
+                result = edit.copy_item(copy_save(), prefab, entry=entry)
+                self.assertEqual(result.data, copy_save(copy_of=entry))
+
+    def test_the_new_instance_number_is_even_negative_below_the_others_and_unused(self) -> None:
+        cases = (
+            (["-10", "-4"], [], -12),
+            (["-9", "-4"], [], -12),                                        # an odd lowest number
+            (["1474360"], [], -2),                                          # nothing below zero
+            ([None, "12.5"], [], -2),                                       # no number that can be read
+            # -12 is taken as a number and -14 as text. The other two are no whole numbers.
+            (["-10"], [Number("-12"), "-14", Number("-16.5"), "minus 16"], -16),
+            ([], [], -2),
+        )
+        for numbers, elsewhere, expected in cases:
+            with self.subTest(numbers=numbers):
+                save = codec.decode_save(numbered_save(numbers, elsewhere))
+                self.assertEqual(edit._unused_number(save), expected)
+
+    def test_items_the_tool_does_not_copy(self) -> None:
+        other = "its record names this one item in another way too, so a copy would not be a second item: "
+        cases = (
+            ("GEAR_WoolSocks", 2, "you are wearing it in this save, and the copy would be worn as well. Take "
+                                  "it off in the game first"),
+            ("GEAR_Scarf", None, "whether you are wearing it is not stored the way this tool expects"),
+            ("GEAR_WaterSupplyPotable", None, "the game keeps the water you carry in this entry. Use "
+                                              "set-liters to add water"),
+            ("GEAR_SprayPaintCan", None, other + "m_ObjectGuidSerialized"),
+            ("GEAR_PostCard_ML_LakeOverlook", None, other + "m_MissionObjectSerialized"),
+            ("GEAR_Respirator", None, other + "m_RespiratorSerialized > AttachedCanister > m_InstanceIDProxy"),
+            ("GEAR_BedRoll", None, other + "m_BedSerialized > m_Guid"),
+            ("GEAR_InsulatedFlask_B", None, other + "m_InsulatedFlaskSerialized > m_SerializedItems[0] > "
+                                                    "m_SerializedGear > m_InstanceIDProxy"),
+            ("GEAR_Knife", None, "its instance number is not stored the way this tool expects"),
+            ("GEAR_Tinder", None, "its instance number is not stored the way this tool expects"),
+        )
+        entries = {"GEAR_Scarf": 13, "GEAR_WaterSupplyPotable": 4, "GEAR_SprayPaintCan": 5,
+                   "GEAR_PostCard_ML_LakeOverlook": 6, "GEAR_Respirator": 7, "GEAR_BedRoll": 8,
+                   "GEAR_InsulatedFlask_B": 15, "GEAR_Knife": 10, "GEAR_Tinder": 11, "GEAR_WoolSocks": 2}
+        for prefab, entry, reason in cases:
+            with self.subTest(prefab=prefab):
+                with self.assertRaises(EditError) as refused:
+                    edit.copy_item(copy_save(), prefab, entry=entry)
+                self.assertIn(f"inventory entry {entries[prefab]} ({prefab}) is not copied: {reason}",
+                              str(refused.exception))
+
+    def test_requests_that_do_not_name_exactly_one_item_are_refused(self) -> None:
+        for prefab, entry, message in (("GEAR_WoolSocks", None, "Add --entry to say which one"),
+                                       ("GEAR_Nope", None, "there is no GEAR_Nope in the inventory"),
+                                       ("GEAR_MRE", 1, "inventory entry 1 is GEAR_WoodMatches, not GEAR_MRE")):
+            with self.subTest(prefab=prefab, entry=entry):
+                with self.assertRaises(EditError) as refused:
+                    edit.copy_item(copy_save(), prefab, entry=entry)
+                self.assertIn(message, str(refused.exception))
+
+    def test_the_original_bytes_are_left_alone(self) -> None:
+        original = copy_save()
+        kept = bytes(original)
+        edit.copy_item(original, "GEAR_MRE")
+        self.assertEqual(original, kept)
+
+    def test_saves_that_fail_the_rebuild_check_are_not_edited(self) -> None:
+        with self.assertRaises(EditError) as refused:
+            edit.copy_item(b"not a save", "GEAR_MRE")
+        self.assertIn("does not pass the exact rebuild check", str(refused.exception))
+
+    def refused_with(self, wrong: bytes) -> str:
+        """What the tool says when the encoder hands back wrong in place of the save with the copy."""
+        with encoding_as(copy_save(copy_of=0), wrong):
+            with self.assertRaises(EditError) as caught:
+                edit.copy_item(copy_save(), "GEAR_MRE")
+        return str(caught.exception)
+
+    def test_a_copy_that_keeps_the_old_number_is_caught(self) -> None:
+        self.assertIn("is not the original one plus a copy of entry 0: the new item is not entry 0 with a new "
+                      "instance number and nothing else changed", self.refused_with(copy_save(0, "-1001000")))
+
+    def test_a_copy_of_another_item_is_caught(self) -> None:
+        self.assertIn("the new item is not entry 0 with a new instance number", self.refused_with(copy_save(1)))
+
+    def test_a_copy_that_differs_from_its_source_is_caught(self) -> None:
+        save = codec.decode_save(copy_save(copy_of=0))
+        edit._inventory_items(save)[17]["m_SerializedGear"].value["m_NormalizedCondition"] = Number("1.0")
+        self.assertIn("the new item is not entry 0 with a new instance number",
+                      self.refused_with(codec.encode_save(save)))
+
+    def test_a_copy_that_also_changes_an_original_item_is_caught(self) -> None:
+        save = codec.decode_save(copy_save(copy_of=0))
+        edit._inventory_items(save)[14]["m_SerializedGear"].value["m_NormalizedCondition"] = Number("1.0")
+        self.assertIn("the item at entry 14 is not the original one",
+                      self.refused_with(codec.encode_save(save)))
+
+    def test_a_copy_that_is_not_at_the_end_is_caught(self) -> None:
+        save = codec.decode_save(copy_save(copy_of=0))
+        items = edit._inventory_items(save)
+        items.insert(0, items.pop())
+        self.assertIn("the item at entry 0 is not the original one", self.refused_with(codec.encode_save(save)))
+
+    def test_two_copies_are_caught(self) -> None:
+        save = codec.decode_save(copy_save(copy_of=0))
+        items = edit._inventory_items(save)
+        items.append(items[1])
+        self.assertIn("17 items -> 19 items", self.refused_with(codec.encode_save(save)))
+
+    def test_the_check_of_the_inventory_counts_the_items(self) -> None:
+        with self.assertRaises(EditError) as caught:
+            edit._prove_copy(copy_save(), copy_save(), 0, "-5240390")
+        self.assertIn("plus a copy of entry 0: 17 items where 18 were expected", str(caught.exception))
+        edit._prove_copy(copy_save(), copy_save(copy_of=0), 0, "-5240390")
+
+    def test_a_new_number_that_the_save_holds_elsewhere_is_caught(self) -> None:
+        # -5240388 is in the save already, in a place outside the inventory.
+        with self.assertRaises(EditError) as caught:
+            edit._prove_copy(copy_save(), copy_save(0, "-5240388"), 0, "-5240388")
+        self.assertIn("the save does not hold the new instance number -5240388 in exactly one place",
+                      str(caught.exception))
+
+
 class NewFileTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -1917,8 +2133,8 @@ class CommandTests(unittest.TestCase):
                                         "--count", "40", "--out", str(self.out))
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
-        self.assertEqual(edit.NOT_TESTED_IN_GAME,
-                         frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item"}))
+        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds",
+                                                             "repair-all", "remove-item", "copy-item"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -2303,8 +2519,82 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertIn("Not found", err)
 
+    def test_copy_item_writes_the_edited_save_to_a_new_file(self) -> None:
+        self.save.write_bytes(copy_save())
+        before = self.snapshot()
+        code, out, err = self.run_command("copy-item", str(self.save), "--item", "GEAR_MRE",
+                                          "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.out.read_bytes(), copy_save(copy_of=0))
+        self.assertIn("Item:     GEAR_MRE, inventory entry 0\n", out)
+        self.assertIn("Change:   copied to a new entry at the end of the inventory, entry 17\n", out)
+        self.assertIn("Number:   the copy has the instance number -5240390. The original keeps -1001000\n", out)
+        self.assertIn("Checked:  the edited inventory is the original one plus this copy, and nothing else "
+                      "differs\n", out)
+        self.assertIn("2 of 3 entries are byte for byte unchanged", out)
+        self.assertIn("Untested: no save changed by copy-item has been loaded in the game yet", out)
+        self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
+        after = self.snapshot()
+        self.assertEqual(after[:2], before[:2], "the original save changed")
+        self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
+
+    def test_copy_item_says_what_a_stack_holds(self) -> None:
+        self.save.write_bytes(copy_save())
+        code, out, _ = self.run_command("copy-item", str(self.save), "--item", "GEAR_WoodMatches",
+                                        "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertIn("Change:   copied (a stack of 23) to a new entry at the end of the inventory, entry 17\n",
+                      out)
+
+    def test_copy_item_with_an_entry_number(self) -> None:
+        self.save.write_bytes(copy_save())
+        code, out, _ = self.run_command("copy-item", str(self.save), "--item", "GEAR_WoolSocks", "--entry", "3",
+                                        "--out", str(self.out))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.out.read_bytes(), copy_save(copy_of=3))
+
+    def test_copy_item_refusals_write_nothing(self) -> None:
+        self.save.write_bytes(copy_save())
+        existing = self.folder / "taken.edited"
+        existing.write_bytes(b"already here")
+        cases = {
+            "worn": (["--item", "GEAR_WoolSocks", "--entry", "2", "--out", str(self.out)],
+                     "you are wearing it"),
+            "water": (["--item", "GEAR_WaterSupplyPotable", "--out", str(self.out)], "the water you carry"),
+            "named in another way": (["--item", "GEAR_BedRoll", "--out", str(self.out)],
+                                     "names this one item in another way too"),
+            "several": (["--item", "GEAR_WoolSocks", "--out", str(self.out)], "Add --entry"),
+            "unknown item": (["--item", "GEAR_Nope", "--out", str(self.out)], "there is no GEAR_Nope in the"),
+            "output exists": (["--item", "GEAR_MRE", "--out", str(existing)], "already exists"),
+        }
+        before = self.snapshot()
+        for name, (options, message) in cases.items():
+            with self.subTest(name):
+                code, out, err = self.run_command("copy-item", str(self.save), *options)
+                self.assertEqual(code, 1)
+                self.assertIn("Refused:", err)
+                self.assertIn(message, err)
+                self.assertIn("Nothing was written.", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(existing.read_bytes(), b"already here")
+
+    def test_copy_item_checks_the_output_path_before_any_edit_work(self) -> None:
+        with mock.patch.object(edit, "copy_item") as attempted:
+            code, _, _ = self.run_command("copy-item", str(self.save), "--item", "GEAR_Hatchet",
+                                          "--out", str(self.folder / "sandbox16"))
+        self.assertEqual(code, 1)
+        attempted.assert_not_called()
+
+    def test_copy_item_on_a_missing_save_is_a_usage_error(self) -> None:
+        code, out, err = self.run_command("copy-item", str(self.folder / "sandbox99"), "--item", "GEAR_Stick",
+                                          "--out", str(self.out))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("Not found", err)
+
     def test_missing_options_are_a_usage_error(self) -> None:
         for arguments in ([], ["set-count", str(self.save)], ["repair-all", str(self.save)],
+                          ["copy-item", str(self.save), "--out", str(self.out)],
                           ["remove-item", str(self.save), "--out", str(self.out)],
                           ["set-count", str(self.save), "--item", "GEAR_Stick", "--out", str(self.out)],
                           ["set-liters", str(self.save), "--item", "GEAR_LampFuel", "--out", str(self.out)],
@@ -2592,6 +2882,28 @@ class RealSaveTests(unittest.TestCase):
                 if gear["m_InstanceIDProxy"].literal in held or gear.get("m_WaterSupplySerialized") is not None:
                     with self.subTest(save=path.name, entry=entry):
                         self.assertIsNotNone(edit._why_it_stays(decoded, entry, one["m_PrefabName"]))
+
+    def test_one_item_can_be_copied_in_every_real_save(self) -> None:
+        """In memory only. No file is written."""
+        folder = Path(os.environ["TLD_SAVE_DIR"])
+        saves = codec.find_saves(folder)
+        self.assertTrue(saves, f"no save files found in {folder}")
+        for path in saves:
+            with self.subTest(save=path.name):
+                original = path.read_bytes()
+                decoded = codec.decode_save(original)
+                items = edit._inventory_items(decoded)
+                before = edit.list_items(decoded)
+                target = next((one for one in before if edit._why_no_copy(items[one.entry]) is None), None)
+                self.assertIsNotNone(target, "no item in this inventory may be copied")
+                result = edit.copy_item(original, target.prefab, entry=target.entry)
+                self.assertEqual(result.unchanged_entries, result.entries - 1)
+                self.assertTrue(codec.verify_save(result.data).identical)
+                self.assertEqual(result.entry, len(items))
+                self.assertEqual(edit.list_items(codec.decode_save(result.data)),
+                                 before + [Item(len(items), target.prefab, target.count, target.condition)])
+                number = int(result.new_number)
+                self.assertTrue(number < 0 and number % 2 == 0, number)
 
     def test_every_stored_condition_is_in_the_form_this_tool_writes(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])
