@@ -403,6 +403,11 @@ Things to know about `remove-item`:
     item's instance number, and that number would then point at nothing.
   - Any other item whose instance number appears a second time anywhere in the save. In 14
     real saves that happens only for the item in the hands and the last item held.
+  - An item with another item inside it, such as a respirator with its canister, when the
+    save holds the instance number of the item inside anywhere outside that inventory entry.
+    The item inside goes with the entry, so the same rules apply to its number: it must be a
+    whole number of four digits or more, and nothing else in the save may point at it. In
+    the 14 real saves two respirators hold a canister, and nothing else points at either.
 - The two saves differ in one place, the length of the inventory list. The comparison does
   not look inside a list that changed its length, so the tool then checks every item that is
   left against the original list.
