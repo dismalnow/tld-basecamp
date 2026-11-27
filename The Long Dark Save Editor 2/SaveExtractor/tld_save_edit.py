@@ -1717,8 +1717,8 @@ def set_player_values(original: bytes, values: Dict[str, float]) -> PlayerEdit:
     the save holds already.
 
     The game leaves a number out of the save when it is 0. Such a number is put in as the first
-    field of its record, which is where the game writes it. The condition is the exception: a
-    save without one is that of a dead character, and this tool does not bring it back.
+    field of its record, which is where the game writes it. A missing, zero or negative
+    condition means the character is dead, so a condition edit is refused.
     """
     unknown = [name for name in values if name not in PLAYER_VALUES]
     if unknown or not values:
@@ -1762,6 +1762,9 @@ def set_player_values(original: bytes, values: Dict[str, float]) -> PlayerEdit:
         number = _finite(old)
         if number is None or not isinstance(old, Number):
             raise EditError(f"{name} is not stored as a number ({where.field}), so it is not changed")
+        if name == "condition" and number <= 0:
+            raise EditError(f"this save holds a condition of {old.literal}, which means the character is dead. "
+                            "This tool does not bring it back")
         if number == Decimal(new):
             raise EditError(f"{name} is already {_player_text(name, _shown(name, number))}. Nothing to change")
         record[where.field] = Number(new)

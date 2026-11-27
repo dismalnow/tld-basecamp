@@ -2369,6 +2369,18 @@ class SetPlayerTests(unittest.TestCase):
         self.assertIn("calories is already 0.0: the game leaves m_CurrentReserveCaloriesProxy out of the save "
                       "when it is 0", self.refusal({"calories": 0}, player_save({"calories": None})))
 
+    def test_only_a_positive_stored_condition_can_be_changed(self) -> None:
+        living = player_save({"condition": "0.01"})
+        raised = edit.set_player_values(living, {"condition": 100})
+        self.assertEqual(raised.changes, (("condition", "0.01", "100.0"),))
+        for old in ("0.0", "-0.0", "-1.25"):
+            with self.subTest(old=old):
+                source = player_save({"condition": old})
+                with self.assertRaises(EditError) as caught:
+                    edit.set_player_values(source, {"condition": 100})
+                self.assertEqual(str(caught.exception), f"this save holds a condition of {old}, which means "
+                                 "the character is dead. This tool does not bring it back")
+
     def test_a_missing_condition_is_not_put_in(self) -> None:
         dead = player_save({"condition": None})
         self.assertIn("this save holds no condition, which means 0: the character is dead. This tool does not "
