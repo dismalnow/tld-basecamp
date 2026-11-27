@@ -848,11 +848,43 @@ To undo:    python tld_save_apply.py restore "C:\Users\you\AppData\Local\Hinterl
    so a file with other entries did not come from it. The refusal names the entries that
    are missing or extra. A file with no entries at all passes the three checks above, and
    this one stops it.
+5. The edited file keeps the last change that `apply` or `restore` made to the save. This
+   tool does not touch the time that the game stamped on a save, so check 3 cannot tell
+   apart two edited files that were made from the same save. Putting the second one in place
+   would undo the first without a word. To catch that, the tool reads the newest backup of
+   the save in the backup folder. When the game has not written the save since that backup
+   was taken, the backup is the save as it was before the last change, and the edited file
+   must still hold that change:
+   - An inventory entry that the last change removed is still gone.
+   - An entry that it added is still there.
+   - A value that it changed is not back at what the backup holds. The value may have
+     changed again, and the item that holds it may have been removed.
+
+   The refusal names the first thing that the file would undo. The check cannot know why a
+   file lacks the last change, so it also refuses a file that takes a part of it back on
+   purpose, and a file that brings back something a `restore` took away. To take the whole
+   change back, use `restore`. To put such a file in place as it is, add `--allow-undo`.
+
+Check 5 has limits. It does not run when the backup folder holds no backup of the save,
+when the newest one cannot be read, or when the game has written the save since that backup
+was taken. It sees only the backup folder in use, so a backup that was moved away, or
+another `--backup-dir`, hides the last change from it. It looks one change back and no
+further. A list that is longer or shorter than before counts as one value. When the check
+has run, the preview says so and names the backup. With `--allow-undo` it names the first
+thing that goes:
+
+```text
+Checked:    the edited file keeps the last change made to the save (backup sandbox15.backup-20261124-051500)
+```
+
+```text
+Undoes:     the last change made to the save, or a part of it, as --allow-undo allows (backup sandbox15.backup-20261124-051500): m_Dict > global > m_Inventory_Serialized > m_SerializedItems[3] > m_SerializedGear > m_StackableItemSerialized > m_UnitsProxy would lose the change from 40 to 50
+```
 
 Then it works in this order and stops at the first step that fails:
 
-5. The live save is copied to the backup folder under a new name, and the copy is read back.
-6. The edited content is put in place of the live save in one step, and the save is read
+6. The live save is copied to the backup folder under a new name, and the copy is read back.
+7. The edited content is put in place of the live save in one step, and the save is read
    back.
 
 To see the backups of a save and put one back:
@@ -872,7 +904,9 @@ Backups go to `TLD-save-backups` in your home folder, or to the folder you name 
 because Steam Cloud syncs everything under `Hinterland\TheLongDark`. This tool never
 deletes or overwrites a backup.
 
-`--dry-run` runs every check, prints what would happen, and changes nothing.
+`--dry-run` runs every check, prints what would happen, and changes nothing. `--allow-undo`
+lets `apply` put a file in place that takes back the last change to the save, or a part of
+it: see check 5 above.
 
 Exit code 0 means done, 1 means refused or stopped with the reason printed, and 2 means a
 file was not found or an option was wrong.
@@ -945,6 +979,10 @@ Things to know about several edits in a row:
   second round, use other names or another folder.
 - `apply` checks the last file against the live save as it is at that moment. When the game
   has saved since the first edit was made, it refuses, and the edits have to be made again.
+- Two files that were each made from the live save cannot be put in place one after the
+  other. The second one does not hold what the first one changed, so `apply` refuses it
+  (check 5 above). Give each edit the file that the edit before it wrote, as in the example,
+  or make the second file once the first is in place.
 
 ## Keep the item table current
 
