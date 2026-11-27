@@ -399,6 +399,172 @@ class ApplyTests(FolderCase):
         self.assertEqual(plan.backup.parent, self.backups)
 
 
+class LastChangeTests(FolderCase):
+    def plan(self, source: bytes, allow_undo: bool = False) -> apply.Plan:
+        self.edited.write_bytes(source)
+        return apply.plan_apply(self.live, self.edited, self.backups, now=NOW, allow_undo=allow_undo)
+
+    def first(self, before: bytes, after: bytes) -> Path:
+        self.live.write_bytes(before)
+        self.edited.write_bytes(after)
+        return self.apply_now()
+
+    def printed(self, plan: apply.Plan) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            apply._print_plan(plan, "apply")
+        return out.getvalue()
+
+    def assert_checked(self, source: bytes, backup: Path, allow_undo: bool = False) -> None:
+        plan = self.plan(source, allow_undo)
+        self.assertEqual((plan.last_change_backup, plan.undone), (backup, None))
+        shown = self.printed(plan)
+        self.assertIn("Checked:    the edited file keeps the last change made to the save "
+                      f"(backup {backup.name})\n", shown)
+        self.assertNotIn("Undoes:", shown)
+
+    def refused(self, source: bytes, backup: Path, detail: str) -> None:
+        """Without --allow-undo the file is refused. With it, the plan says what the file takes back."""
+        with self.assertRaises(ApplyError) as caught:
+            self.plan(source)
+        self.assertEqual(str(caught.exception),
+                         f"{self.edited.name} does not keep the last change made to {self.live.name}, so "
+                         f"putting it in place would undo that change: {detail}. The backup {backup.name} "
+                         "holds the save as it was before that change. If the edited file was made before "
+                         f"it, make the edit again from {self.live.name} as it is now. To take the whole "
+                         "change back, put that backup back with restore. To put this file in place as it "
+                         "is, add --allow-undo")
+        plan = self.plan(source, allow_undo=True)
+        self.assertEqual((plan.last_change_backup, plan.undone), (backup, detail))
+        shown = self.printed(plan)
+        self.assertIn("Undoes:     the last change made to the save, or a part of it, as --allow-undo allows "
+                      f"(backup {backup.name}): {detail}\n", shown)
+        self.assertNotIn("keeps the last change", shown)
+
+    def test_with_allow_undo_the_file_is_put_in_place(self) -> None:
+        self.apply_now()
+        later = NOW + timedelta(seconds=1)
+        self.edited.write_bytes(self.original)
+        plan = apply.plan_apply(self.live, self.edited, self.backups, now=later, allow_undo=True)
+        apply.carry_out(plan)
+        self.assertEqual(self.live.read_bytes(), self.original)
+        self.assertEqual(self.backup_at(later).read_bytes(), self.edited_data)
+
+    def test_allow_undo_changes_nothing_for_a_file_that_keeps_the_last_change(self) -> None:
+        backup = self.apply_now()
+        self.assert_checked(with_matches(self.edited_data, 50), backup, allow_undo=True)
+
+    def test_independent_player_edit_would_undo_condition(self) -> None:
+        save = codec.decode_save(self.original)
+        save.entries["global"].update({
+            "m_Condition_Serialized": NestedJson({"m_CurrentHPProxy": Number("60.0")}),
+            "m_Thirst_Serialized": NestedJson({"m_CurrentThirstProxy": Number("20.0")}),
+        })
+        base = codec.encode_save(save)
+        backup = self.first(base, edit.set_player_values(base, {"condition": 100}).data)
+        self.refused(edit.set_player_values(base, {"hydration": 100}).data, backup,
+                     "m_Dict > global > m_Condition_Serialized > m_CurrentHPProxy would lose the change "
+                     "from 60.0 to 100.0")
+
+    def test_setting_a_value_back_is_refused(self) -> None:
+        backup = self.apply_now()
+        self.refused(self.original, backup, f"{COUNT_PATH} would lose the change from 23 to 40")
+
+    def test_after_a_restore_the_file_it_took_back_is_refused(self) -> None:
+        backup = self.apply_now()
+        later = NOW + timedelta(seconds=1)
+        apply.carry_out(apply.plan_restore(self.live, backup, self.backups, now=later))
+        self.refused(self.edited_data, self.backup_at(later),
+                     f"{COUNT_PATH} would lose the change from 40 to 23")
+
+    def test_taking_out_the_entry_that_the_last_change_added_is_refused(self) -> None:
+        base = carrying(CARRIED)
+        copied = edit.copy_item(base, "GEAR_Stick")
+        backup = self.first(base, copied.data)
+        without = edit.remove_item(copied.data, "GEAR_Stick", entry=copied.entry).data
+        self.assertEqual(without, base)
+        self.refused(without, backup, "the GEAR_Stick that the change added (instance number "
+                     f"{copied.new_number}) would be gone")
+
+    def test_edit_on_top_of_applied_file(self) -> None:
+        backup = self.apply_now()
+        self.assert_checked(edit.set_item_condition(self.edited_data, "GEAR_WoodMatches", 50).data, backup)
+
+    def test_same_value_can_change_again(self) -> None:
+        backup = self.apply_now()
+        self.assert_checked(with_matches(self.edited_data, 50), backup)
+
+    def test_edit_after_restore_uses_newest_backup(self) -> None:
+        backup = self.apply_now()
+        later = NOW + timedelta(seconds=1)
+        apply.carry_out(apply.plan_restore(self.live, backup, self.backups, now=later))
+        self.assert_checked(edit.set_item_condition(self.original, "GEAR_WoodMatches", 50).data,
+                            self.backup_at(later))
+
+    def test_changed_item_can_be_removed(self) -> None:
+        base = carrying(CARRIED)
+        changed = edit.set_item_condition(base, "GEAR_Hatchet", 100).data
+        backup = self.first(base, changed)
+        self.assert_checked(edit.remove_item(changed, "GEAR_Hatchet").data, backup)
+
+    def test_reintroducing_a_removed_entry_is_refused(self) -> None:
+        base = carrying(CARRIED)
+        backup = self.first(base, edit.remove_item(base, "GEAR_Hatchet").data)
+        self.refused(edit.copy_item(base, "GEAR_Stick").data, backup,
+                     "inventory entry 1 (GEAR_Hatchet), which that change removed, would be back")
+
+    def test_losing_an_added_entry_is_refused(self) -> None:
+        base = carrying(CARRIED)
+        backup = self.first(base, edit.copy_item(base, "GEAR_Stick").data)
+        self.refused(edit.remove_item(base, "GEAR_Hatchet").data, backup,
+                     "the GEAR_Stick that the change added (instance number -1001008) would be gone")
+
+    def test_reusing_an_added_number_for_another_prefab_is_refused(self) -> None:
+        base = carrying(CARRIED)
+        backup = self.first(base, edit.copy_item(base, "GEAR_Stick").data)
+        other = edit.copy_item(base, "GEAR_Hatchet")
+        self.assertEqual(other.new_number, "-1001008")
+        self.refused(other.data, backup,
+                     "the GEAR_Stick that the change added (instance number -1001008) would be gone")
+
+    def test_added_entry_can_move_to_a_different_index(self) -> None:
+        base = carrying(CARRIED)
+        copied = edit.copy_item(base, "GEAR_Stick").data
+        backup = self.first(base, copied)
+        self.assert_checked(edit.remove_item(copied, "GEAR_Hatchet").data, backup)
+
+    def test_no_backup_skips_check(self) -> None:
+        self.assertIsNone(self.plan(self.edited_data).last_change_backup)
+
+    def test_other_header_skips_check(self) -> None:
+        self.backups.mkdir()
+        self.backup_at(NOW).write_bytes(make_save(saved_at=SAVED_LATER))
+        self.assertIsNone(self.plan(self.edited_data).last_change_backup)
+
+    def test_other_slot_skips_check(self) -> None:
+        self.backups.mkdir()
+        self.backup_at(NOW).write_bytes(make_save(name="sandbox13"))
+        self.assertIsNone(self.plan(self.edited_data).last_change_backup)
+
+    def test_damaged_newest_backup_skips_even_with_an_older_backup(self) -> None:
+        self.apply_now()
+        self.backup_at(NOW + timedelta(seconds=1)).write_bytes(b"damaged")
+        stale = edit.set_item_condition(self.original, "GEAR_WoodMatches", 50).data
+        self.assertIsNone(self.plan(stale).last_change_backup)
+
+    def test_unreadable_newest_backup_skips_check(self) -> None:
+        backup = self.apply_now()
+        read = Path.read_bytes
+
+        def unreadable(path: Path) -> bytes:
+            if path == backup:
+                raise PermissionError("test backup is unreadable")
+            return read(path)
+
+        with mock.patch.object(Path, "read_bytes", unreadable):
+            self.assertIsNone(self.plan(with_matches(self.edited_data, 50)).last_change_backup)
+
+
 class CarryOutFailureTests(FolderCase):
     def test_a_backup_that_cannot_be_written_stops_everything(self) -> None:
         plan = apply.plan_apply(self.live, self.edited, self.backups, now=NOW)
@@ -730,6 +896,34 @@ class CommandTests(FolderCase):
         code, out, err = self.run_command(*self.apply_arguments("--dry-run"))
         self.assertEqual((code, out), (1, ""))
         self.assertIn("Refused: the game is running", err)
+        self.assert_nothing_changed()
+
+    def test_a_file_that_undoes_the_last_change_needs_allow_undo(self) -> None:
+        self.assertEqual(self.run_command(*self.apply_arguments())[0], 0)
+        backup = self.only_backup()
+        self.edited.write_bytes(self.original)
+        code, out, err = self.run_command(*self.apply_arguments("--dry-run"))
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Refused: sandbox15.edited does not keep the last change made to sandbox15, so putting "
+                      f"it in place would undo that change: {COUNT_PATH} would lose the change from 23 to 40. "
+                      f"The backup {backup.name} holds the save as it was before that change.", err)
+        self.assertTrue(err.endswith("To put this file in place as it is, add --allow-undo\n"
+                                     "Nothing was changed.\n"), err)
+        code, out, err = self.run_command(*self.apply_arguments("--dry-run", "--allow-undo"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("Undoes:     the last change made to the save, or a part of it, as --allow-undo allows "
+                      f"(backup {backup.name}): {COUNT_PATH} would lose the change from 23 to 40\n", out)
+        self.assertEqual(self.live.read_bytes(), self.edited_data)
+        self.assertEqual(self.only_backup(), backup)
+        code, out, err = self.run_command(*self.apply_arguments("--allow-undo"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.live.read_bytes(), self.original)
+        self.assertEqual(len(list(self.backups.iterdir())), 2)
+
+    def test_restore_takes_no_allow_undo(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            apply.main(["restore", str(self.live), "--from", str(self.edited), "--allow-undo"])
+        self.assertEqual(caught.exception.code, 2)
         self.assert_nothing_changed()
 
     def test_a_refusal_is_printed_and_changes_nothing(self) -> None:

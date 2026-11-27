@@ -4,7 +4,7 @@ tld_save_apply.py: put an edited save in place of the live one after a checked b
 put a backup back.
 
 Usage:
-    python tld_save_apply.py apply SAVE --from EDITED_FILE [--backup-dir FOLDER] [--dry-run]
+    python tld_save_apply.py apply SAVE --from EDITED_FILE [--backup-dir FOLDER] [--dry-run] [--allow-undo]
     python tld_save_apply.py restore SAVE --from BACKUP_FILE [--backup-dir FOLDER] [--dry-run]
     python tld_save_apply.py backups SAVE [--backup-dir FOLDER]
 
@@ -19,11 +19,15 @@ apply refuses unless all of this holds:
        since. Otherwise putting it in place would undo what the game saved later.
     4. EDITED_FILE holds the same entries as SAVE (boot, global, and one per scene), in the
        same order.
+    5. EDITED_FILE keeps the last change that apply or restore made to SAVE. The newest
+       backup of SAVE in the backup folder shows what that change was, as long as the game
+       has not written SAVE since. Without such a backup this check does not run. With
+       --allow-undo the file is put in place all the same, and the output says what goes.
 It then lists what differs between SAVE and EDITED_FILE: the inventory entries that went or
 came, and every other value. After that it works in this order and stops at the first step
 that fails:
-    5. Copy SAVE into the backup folder under a new name, and read the copy back.
-    6. Put the edited content in place of SAVE in one step, and read SAVE back.
+    6. Copy SAVE into the backup folder under a new name, and read the copy back.
+    7. Put the edited content in place of SAVE in one step, and read SAVE back.
 
 restore puts a backup back the same way. Whatever SAVE holds at that moment is backed up
 first, so a restore can be undone too. backups lists the backups of one save, newest first.
@@ -218,6 +222,10 @@ class Plan:
     # item), and the ones only the edited file holds, as (entry number in the edited file, item)
     removed: Tuple[Tuple[int, str], ...] = ()
     added: Tuple[Tuple[int, str], ...] = ()
+    # apply: the backup that showed what the last change to the save was. None when that check did not run
+    last_change_backup: Optional[Path] = None
+    # apply: the first part of that change which the edited file takes back. None when it keeps all of it
+    undone: Optional[str] = None
 
 
 def _backup_path(backup_dir: Path, live: Path, now: Optional[datetime]) -> Path:
@@ -235,10 +243,40 @@ def _backup_path(backup_dir: Path, live: Path, now: Optional[datetime]) -> Path:
     return candidate
 
 
-def plan_apply(live: Path, edited: Path, backup_dir: Path, now: Optional[datetime] = None) -> Plan:
+def _last_change_check(current: DecodedSave, proposed: DecodedSave, live: Path,
+                       backup_dir: Path) -> Tuple[Optional[Path], Optional[str]]:
+    """Whether an edited file would undo the last change apply or restore made to the live save.
+
+    Returns the backup the check used and the first part of the last change that the edited
+    file takes back: (None, None) when the check could not run, and (backup, None) when the
+    file keeps all of it.
+
+    tld_save_edit.py leaves the header of a save alone, so two edited files made from one
+    save both pass _require_same_game_save, and the second would undo the first. The newest
+    backup of the save shows what the last change was, as long as its header is the one the
+    live save has now: the game has then not written the save since. No backup, a newest
+    backup that cannot be read, or one with another header means that nothing can be said.
+    """
+    try:
+        backups = list_backups(live.name, backup_dir)
+        if not backups:
+            return None, None
+        newest = backups[0].path
+        before = _decode_exact(newest.read_bytes(), newest.name)
+    except (OSError, ApplyError):
+        return None, None
+    if before.slot.get("m_InternalName") != live.name or _header(before) != _header(current):
+        return None, None
+    return newest, edit.first_undone_change(before, current, proposed)
+
+
+def plan_apply(live: Path, edited: Path, backup_dir: Path, now: Optional[datetime] = None,
+               allow_undo: bool = False) -> Plan:
     """Run every check for putting an edited file in place of the live save.
 
-    Raises ApplyError when a check fails. Changes nothing.
+    Raises ApplyError when a check fails. Changes nothing. With allow_undo, a file that takes
+    back the last change to the save, or a part of it, is not refused for that: the plan says
+    what it takes back.
     """
     _require_game_closed()
     _require_save_name(live)
@@ -255,8 +293,17 @@ def plan_apply(live: Path, edited: Path, backup_dir: Path, now: Optional[datetim
     found = edit.compare_saves(current, proposed)
     if not (found.changes or found.removed or found.added):
         raise ApplyError(f"{edited.name} holds exactly what {live.name} already holds. Nothing to put in place")
+    checked_backup, undone = _last_change_check(current, proposed, live, backup_dir)
+    if checked_backup is not None and undone is not None and not allow_undo:
+        raise ApplyError(f"{edited.name} does not keep the last change made to {live.name}, so putting it in "
+                         f"place would undo that change: {undone}. The backup {checked_backup.name} holds "
+                         "the save as it was before that change. If the edited file was made before it, "
+                         f"make the edit again from {live.name} as it is now. To take the whole change "
+                         "back, put that backup back with restore. To put this file in place as it is, "
+                         "add --allow-undo")
     return Plan(live, edited, new_data, _saved_at(proposed), old_data, _saved_at(current),
-                _backup_path(backup_dir, live, now), found.changes, found.removed, found.added)
+                _backup_path(backup_dir, live, now), found.changes, found.removed, found.added,
+                checked_backup, undone)
 
 
 def plan_restore(live: Path, backup: Path, backup_dir: Path, now: Optional[datetime] = None) -> Plan:
@@ -472,13 +519,20 @@ def _print_plan(plan: Plan, command: str) -> None:
         print("Checked:    the game is not running")
         print("Checked:    both files pass the exact rebuild check")
         print("Checked:    the edited file was made from the save as it is now")
+        if plan.last_change_backup is not None and plan.undone is not None:
+            print("Undoes:     the last change made to the save, or a part of it, as --allow-undo allows "
+                  f"(backup {plan.last_change_backup.name}): {plan.undone}")
+        elif plan.last_change_backup is not None:
+            print("Checked:    the edited file keeps the last change made to the save "
+                  f"(backup {plan.last_change_backup.name})")
     else:
         print(f"Restoring:  {plan.source}, {len(plan.new_data):,} bytes, the save as of {plan.new_saved_at}")
         print("Checked:    the game is not running")
         print(f"Checked:    that file passes the exact rebuild check and is a copy of {plan.live.name}")
 
 
-def _run_change(command: str, live: Path, source: Path, backup_dir: Path, dry_run: bool) -> int:
+def _run_change(command: str, live: Path, source: Path, backup_dir: Path, dry_run: bool,
+                allow_undo: bool = False) -> int:
     if command == "apply" and not live.is_file():
         print(f"Not found: {live}", file=sys.stderr)
         return 2
@@ -486,7 +540,7 @@ def _run_change(command: str, live: Path, source: Path, backup_dir: Path, dry_ru
         print(f"Not found: {source}", file=sys.stderr)
         return 2
     try:
-        plan = (plan_apply(live, source, backup_dir) if command == "apply"
+        plan = (plan_apply(live, source, backup_dir, allow_undo=allow_undo) if command == "apply"
                 else plan_restore(live, source, backup_dir))
     except (ApplyError, codec.SaveFormatError) as error:
         print(f"Refused: {error}", file=sys.stderr)
@@ -562,6 +616,10 @@ or an option was wrong.
         change.add_argument("--backup-dir", type=Path, metavar="FOLDER", help=folder_help)
         change.add_argument("--dry-run", action="store_true",
                             help="run every check, print what would happen, and change nothing")
+        if name == "apply":
+            change.add_argument("--allow-undo", action="store_true",
+                                help="put the file in place even when it takes back the last change that "
+                                     "apply or restore made to the save, or a part of it")
     listing = commands.add_parser("backups", help="list the backups of one save, newest first")
     listing.add_argument("save", type=Path, metavar="SAVE", help="the live save file, or just its name")
     listing.add_argument("--backup-dir", type=Path, metavar="FOLDER", help=f"where the backups are. {usual}")
@@ -575,7 +633,8 @@ or an option was wrong.
             return 2
     if args.command == "backups":
         return _run_backups(args.save, backup_dir)
-    return _run_change(args.command, args.save, args.source, backup_dir, args.dry_run)
+    return _run_change(args.command, args.save, args.source, backup_dir, args.dry_run,
+                       getattr(args, "allow_undo", False))
 
 
 if __name__ == "__main__":

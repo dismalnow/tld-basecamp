@@ -1393,6 +1393,15 @@ class SaveComparison:
     changes: Tuple[Difference, ...]         # every other value that differs, as differences() reports it
 
 
+def _instance_number(item: JsonValue) -> Optional[int]:
+    """The instance number of an inventory entry. None when it is not stored as a whole number."""
+    gear = _gear_of(item)
+    number = gear.get("m_InstanceIDProxy") if gear is not None else None
+    if isinstance(number, Number) and _SIGNED_WHOLE.fullmatch(number.literal):
+        return int(number.literal)
+    return None
+
+
 def _instance_numbers(items: List[JsonValue]) -> Optional[List[int]]:
     """The instance number of every inventory entry, in order.
 
@@ -1400,11 +1409,10 @@ def _instance_numbers(items: List[JsonValue]) -> Optional[List[int]]:
     """
     numbers: List[int] = []
     for item in items:
-        gear = _gear_of(item)
-        number = gear.get("m_InstanceIDProxy") if gear is not None else None
-        if not isinstance(number, Number) or not _SIGNED_WHOLE.fullmatch(number.literal):
+        number = _instance_number(item)
+        if number is None:
             return None
-        numbers.append(int(number.literal))
+        numbers.append(number)
     return numbers if len(set(numbers)) == len(numbers) else None
 
 
@@ -1445,6 +1453,46 @@ def compare_saves(before: DecodedSave, after: DecodedSave) -> SaveComparison:
     changes = tuple(differences(before.slot, after.slot, matched=(_items_path(), pairs), each_field=True))
     return SaveComparison(only_in(old_items, {left for left, _ in pairs}),
                           only_in(new_items, {right for _, right in pairs}), changes)
+
+
+def first_undone_change(backup: DecodedSave, current: DecodedSave, proposed: DecodedSave) -> Optional[str]:
+    """The first part of the last change that the proposed save would undo, or None when it keeps all of it.
+
+    The last change is what differs between the backup and the current save. The proposed
+    save keeps it when it differs from the backup in every one of those places too: an entry
+    that went is still gone, an entry that came is still there under the same instance number
+    and item name, and a value that changed is not back at what the backup holds. A value may
+    have changed again, and the entry that holds it may be gone.
+
+    A list that changed its length is one value here, as it is for differences(). So a
+    proposed save that changes such a list in another way than the last change did passes.
+    """
+    last = compare_saves(backup, current)
+    kept = compare_saves(backup, proposed)
+    gone = {entry for entry, _ in kept.removed}
+    for entry, prefab in last.removed:
+        if entry not in gone:
+            return f"inventory entry {entry} ({prefab}), which that change removed, would be back"
+    if last.added:
+        try:
+            proposed_items = _inventory_items(proposed)
+        except EditError:
+            proposed_items = []
+        held = {(_instance_number(item), _prefab_of(item)) for item in proposed_items}
+        current_items = _inventory_items(current)
+        for entry, prefab in last.added:
+            item = current_items[entry]
+            number = _instance_number(item)
+            if (number, _prefab_of(item)) not in held:
+                return f"the {prefab} that the change added (instance number {number}) would be gone"
+    changed = {path for path, _, _ in kept.changes}
+    # Both comparisons name entries by their position in the backup.
+    removed_paths = {f"{_items_path()}[{entry}]" for entry in gone}
+    removed_fields = tuple(path + " > " for path in removed_paths)
+    for path, old, new in last.changes:
+        if path not in changed and path not in removed_paths and not path.startswith(removed_fields):
+            return f"{path} would lose the change from {old} to {new}"
+    return None
 
 
 # ---------------------------------------------------------------------------
