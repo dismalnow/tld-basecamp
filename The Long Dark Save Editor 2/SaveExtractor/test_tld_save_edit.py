@@ -1915,6 +1915,36 @@ def with_number_of(carried: Sequence[CarriedSpec], entry: int, number: Optional[
 HOURS_PATH = "m_Dict > global > m_HoursPlayed"
 
 
+class PreviewFieldTests(unittest.TestCase):
+    def test_new_points_and_changed_hours_are_both_shown(self) -> None:
+        before = skills_save({"carcass-harvesting": None}, hours="0.5")
+        after = skills_save({"carcass-harvesting": "40"}, hours="0.9")
+        path = skill_path("carcass-harvesting")
+        self.assertEqual(edit.compare_saves(codec.decode_save(before), codec.decode_save(after)).changes,
+                         ((path + " > m_Points", "(left out)", "40"),
+                          (path + " > m_NumHoursToConvertToSkillPoints", "0.5", "0.9")))
+
+    def compare_record(self, first: str, second: str) -> Tuple[edit.Difference, ...]:
+        before, after = (codec.decode_save(carried_save()) for _ in range(2))
+        for save, source in ((before, first), (after, second)):
+            items = save.entries["global"]["m_Inventory_Serialized"].value["m_SerializedItems"]
+            items[0]["m_SerializedGear"].value["record"] = NestedJson(codec.parse_json(source))
+        return edit.compare_saves(before, after).changes
+
+    def test_a_lost_field_shows_its_value(self) -> None:
+        path = ITEMS_PATH + "[0] > m_SerializedGear > record > x"
+        self.assertEqual(self.compare_record('{"x":false}', '{}'), ((path, "false", "(left out)"),))
+
+    def test_common_fields_in_another_order(self) -> None:
+        path = ITEMS_PATH + "[0] > m_SerializedGear > record"
+        self.assertEqual(self.compare_record('{"a":1,"b":2}', '{"b":2,"a":1}'),
+                         ((path, "fields in the order a, b", "fields in the order b, a"),))
+
+    def test_empty_record_gains_a_field(self) -> None:
+        path = ITEMS_PATH + "[0] > m_SerializedGear > record > x"
+        self.assertEqual(self.compare_record('{}', '{"x":null}'), ((path, "(left out)", "null"),))
+
+
 class CompareSavesTests(unittest.TestCase):
     def compare(self, before: bytes, after: bytes) -> edit.SaveComparison:
         return edit.compare_saves(codec.decode_save(before), codec.decode_save(after))

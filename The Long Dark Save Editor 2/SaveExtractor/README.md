@@ -922,6 +922,13 @@ Checked:    the edited file was made from the save as it is now
   A block is left out when it has nothing to list.
 - `Changes` lists every other value that differs. It names an inventory entry by its number
   in the live save, also when an entry before it is gone.
+  - A field that only one of the two files holds is listed with its value on that side and
+    `(left out)` on the other, as in `m_Points: (left out) -> 40`. That is how a number
+    shows up that `set-player` or `set-skill` put in because the game had left it out.
+  - When the fields that both files hold are in another order, that is a line of its own.
+    Where in its record a new field sits is not shown.
+  - A list that is longer or shorter than before is one line with the two lengths, as in
+    `2 items -> 0 items` after `cure`. What changed inside such a list is not listed.
 - Each block shows ten lines at most and counts the rest.
 - The entries of the two inventories are matched by their instance numbers. When that cannot
   be done, because a number is missing or occurs twice, or because the entries are in another
