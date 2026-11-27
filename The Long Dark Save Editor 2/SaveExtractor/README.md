@@ -930,10 +930,12 @@ Checked:    the edited file was made from the save as it is now
   - A list that is longer or shorter than before is one line with the two lengths, as in
     `2 items -> 0 items` after `cure`. What changed inside such a list is not listed.
 - Each block shows ten lines at most and counts the rest.
-- The entries of the two inventories are matched by their instance numbers. When that cannot
-  be done, because a number is missing or occurs twice, or because the entries are in another
-  order, the inventories are compared position by position. An inventory of another length
-  is then one line under `Changes`, and nothing is listed as removed or added.
+- The entries of the two inventories are matched by instance number and item name. The name
+  counts because `copy-item` can give a copy the number that a removed item had, and that
+  is listed as one entry removed and one added. When a number is missing or occurs twice,
+  or when the entries that both inventories hold are in another order, the inventories are
+  compared position by position. An inventory of another length is then one line under
+  `Changes`, and nothing is listed as removed or added.
 
 Things to know about several edits in a row:
 
