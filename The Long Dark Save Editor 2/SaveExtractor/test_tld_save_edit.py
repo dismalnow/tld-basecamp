@@ -22,7 +22,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest import mock
 
 import tld_save_codec as codec
@@ -3113,6 +3113,8 @@ class PositionListTests(unittest.TestCase):
                 switches={"m_PlayerInVehicle": Number("1")}),
             "in a state this tool cannot read (m_PlayerInSnowShelter)": position_save(
                 switches={"m_PlayerInSnowShelter": None}),
+            "in a state this tool cannot read (m_PlayerClimbRopeSerialized)": position_save(
+                records={"m_PlayerClimbRopeSerialized": {"m_RopeGuid": "b7c1f2de"}}),
         }
         for held, save in cases.items():
             with self.subTest(held):
@@ -3124,8 +3126,6 @@ class PositionListTests(unittest.TestCase):
             "switches that are off": position_save(switches={"m_PlayerInVehicle": False,
                                                              "m_PlayerInSnowShelter": False}),
             "no record of a rope": position_save(records={"m_PlayerClimbRopeSerialized": None}),
-            "a record of a rope that is no nested document": position_save(
-                records={"m_PlayerClimbRopeSerialized": {"m_RopeGuid": "b7c1f2de"}}),
             "a rope that is no text": position_save(rope=None),
         }
         for name, save in cases.items():
@@ -3342,6 +3342,80 @@ class SetPositionTests(unittest.TestCase):
         message = self.caught(codec.encode_save(save))
         self.assertIn("1 not asked for (m_Dict > global > m_PlayerManagerSerialized > "
                       "m_PlayerInVehicleCameraPos[0]: -1.464066 -> 5.0)", message)
+
+
+class UnreadDocumentTests(unittest.TestCase):
+    def edits(self) -> Sequence[Tuple[str, bytes, Callable[[bytes], Any]]]:
+        """One edit of every kind, each with a save that it changes."""
+        return (
+            ("set-count", build_save(), lambda b: edit.set_stack_count(b, "GEAR_WoodMatches", 99)),
+            ("set-condition", build_save(), lambda b: edit.set_item_condition(b, "GEAR_Hatchet", 100)),
+            ("set-liters", liquids_save(),
+             lambda b: edit.set_item_liters(b, "GEAR_WaterSupplyPotable", Decimal(1))),
+            ("set-calories", foods_save(), lambda b: edit.set_item_calories(b, "GEAR_MRE", 500, entry=1)),
+            ("set-rounds", weapons_save(), lambda b: edit.set_weapon_rounds(b, "GEAR_Rifle", 10)),
+            ("repair-all", repair_save(), edit.repair_inventory),
+            ("remove-item", removal_save(), lambda b: edit.remove_item(b, "GEAR_Hatchet")),
+            ("copy-item", copy_save(), lambda b: edit.copy_item(b, "GEAR_MRE")),
+            ("set-player", player_save(), lambda b: edit.set_player_values(b, {"condition": 100})),
+            ("set-skill", skills_save(), lambda b: edit.set_skill_points(b, "cooking", 150)),
+            ("cure", afflictions_save(hypothermia=True), edit.cure_afflictions),
+            ("set-position", position_save(), lambda b: edit.set_position(b, {"x": 10})),
+        )
+
+    def with_text_in_boot(self, original: bytes, text: str) -> bytes:
+        save = codec.decode_save(original)
+        save.entries["boot"]["details"] = NestedJson({"sample": [text]})
+        return codec.encode_save(save)
+
+    def test_all_edits_refuse_a_document_kept_as_text_elsewhere(self) -> None:
+        for name, original, run in self.edits():
+            for text in ('[{"x": 1}]', '{"m_WearingProxy":true}\n'):
+                with self.subTest(command=name, text=text):
+                    with self.assertRaises(EditError) as refused:
+                        run(self.with_text_in_boot(original, text))
+                    self.assertIn("this save holds a nested document at m_Dict > boot > details > sample[0] "
+                                  "that is not written the way the game writes one", str(refused.exception))
+
+    def test_ordinary_text_in_brackets_stops_no_edit(self) -> None:
+        for name, original, run in self.edits():
+            for text in ("[Day 3] wolves at the dam [twice]", "{cache}", "[x]"):
+                with self.subTest(command=name, text=text):
+                    result = run(self.with_text_in_boot(original, text))
+                    self.assertTrue(codec.verify_save(result.data).identical)
+
+    def test_worn_socks_in_spaced_json_cannot_be_removed_or_copied(self) -> None:
+        for run in (edit.remove_item, edit.copy_item):
+            with self.subTest(command=run.__name__):
+                save = codec.decode_save(copy_save())
+                gear = edit._gear_of(edit._inventory_items(save)[2])
+                assert gear is not None
+                gear["m_ClothingItemSerialized"] = '{"m_WearingProxy": true}'
+                with self.assertRaisesRegex(EditError, "nested document at .*m_ClothingItemSerialized"):
+                    run(codec.encode_save(save), "GEAR_WoolSocks", 2)
+
+    def test_invalid_clothing_record_is_refused(self) -> None:
+        for clothing in ("x", NestedJson([]), {"m_WearingProxy": True}):
+            save = codec.decode_save(copy_save())
+            gear = edit._gear_of(edit._inventory_items(save)[2])
+            assert gear is not None
+            gear["m_ClothingItemSerialized"] = clothing
+            for run in (edit.remove_item, edit.copy_item):
+                with self.subTest(clothing=clothing, command=run.__name__):
+                    with self.assertRaisesRegex(EditError, "whether you are wearing it is not stored"):
+                        run(codec.encode_save(save), "GEAR_WoolSocks", 2)
+
+    def test_rope_in_spaced_json_prevents_a_move(self) -> None:
+        data = position_save(records={"m_PlayerClimbRopeSerialized": '{"m_RopeGuid": "climbing-rope"}'})
+        with self.assertRaisesRegex(EditError, "nested document at .*m_PlayerClimbRopeSerialized"):
+            edit.set_position(data, {"x": 10})
+
+    def test_unreadable_rope_records_and_guid_prevent_a_move(self) -> None:
+        for record in ("x", NestedJson([]), {"m_RopeGuid": "rope"}, NestedJson({"m_RopeGuid": Number("5")})):
+            with self.subTest(record=record):
+                data = position_save(records={"m_PlayerClimbRopeSerialized": record})
+                with self.assertRaisesRegex(EditError, r"in a state this tool cannot read \(m_PlayerClimbRope"):
+                    edit.set_position(data, {"x": 10})
 
 
 class NewFileTests(unittest.TestCase):

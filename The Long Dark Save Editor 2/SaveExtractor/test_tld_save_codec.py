@@ -245,6 +245,41 @@ class ExactJsonTests(unittest.TestCase):
                 self.assertEqual(document["a"], value)
                 self.assertEqual(codec.render_json(document), text)
 
+    def test_a_document_kept_as_text_is_told_apart_from_ordinary_text(self) -> None:
+        unread = {
+            "space between values": '{"a": 1}',
+            "space in a list": "[1, 2]",
+            "repeated field name": '{"a":1,"a":2}',
+            "escaped letter": r'{"a":"\u00e9"}',
+            "line breaks inside": '{\n"a":1\n}',
+            "line break at the end": '{"a":1}\n',
+            "space in front": ' {"a":1}',
+            "tab behind a list": "[1,2]\t",
+            "nested too deeply to open": "[" * 5000 + "]" * 5000,
+            "nested too deeply to parse": "[" * 200000 + "]" * 200000,
+        }
+        ordinary = {
+            "a document this module opens": '{"a":1}',
+            "an empty list": "[]",
+            "a note in square brackets": "[Day 3] wolves at the dam [twice]",
+            "words in braces": "{not json}",
+            "one bracket": "[",
+            "cut short": '{"a":1',
+            "text behind a document": "{}x",
+            "a number": "12",
+            "a word": "true",
+            "a document in quotes": '"[1, 2]"',
+            "white space only": " \n",
+            "empty": "",
+        }
+        for name, value in unread.items():
+            with self.subTest(name):
+                self.assertTrue(codec.holds_unread_document(value))
+                self.assertEqual(codec.parse_json('{"a":' + json.dumps(value) + "}")["a"], value)
+        for name, value in ordinary.items():
+            with self.subTest(name):
+                self.assertFalse(codec.holds_unread_document(value))
+
     def test_empty_containers_in_text_are_opened_and_written_back(self) -> None:
         text = '{"a":"[]","b":"{}"}'
         document = codec.parse_json(text)
