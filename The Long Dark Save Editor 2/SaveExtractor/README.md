@@ -581,8 +581,12 @@ Things to know about the player's values:
   The save holds thirst, fatigue and cold the other way round: 0 is a full bar, and 100 an
   empty one. The game's wiki says so of thirst: it "is actually the inverse of what is
   displayed". So `--hydration 80` is written as a thirst of 20, and the `Change` line shows
-  both. In one of 14 real saves all three had been set to 100 with another editor, which is
-  dehydrated, exhausted and freezing.
+  both. One of the 14 real saves holds exactly 100 for all three, which is dehydrated,
+  exhausted and freezing at once. Most likely the old C# editor wrote those numbers. That
+  is an inference from two other marks of that editor in the same save: its header holds
+  `m_Name` and `m_BaseName`, which twelve of the 14 saves do not have, and its amounts of
+  liquid are written with a decimal point or an exponent. A save does not say who wrote a
+  number.
 - The game leaves a number out of a save when it is 0, and `player` then says `is left out,
   which means 0`. In the 14 real saves that is so for the cold in seven, and for the fatigue
   in one. `set-player` puts such a number in as the first field of its record. That is where
