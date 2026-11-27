@@ -397,7 +397,8 @@ Things to know about `remove-item`:
 - The tool leaves some items in place and says why:
   - The two entries that hold the water you carry. Every real save has both. Use
     `set-liters` to empty them.
-  - Clothing you are wearing. Take it off in the game first.
+  - Clothing you are wearing. Take it off in the game first. An item whose clothing record
+    the tool cannot read stays as well.
   - The item in your hands, and the last item you held. The save remembers both by the
     item's instance number, and that number would then point at nothing.
   - Any other item whose instance number appears a second time anywhere in the save. In 14
@@ -445,7 +446,8 @@ Things to know about `copy-item`:
   every number in the inventory, and the save holds it nowhere else.
 - The tool does not copy some items, and says why:
   - The two entries that hold the water you carry. Use `set-liters` to add water.
-  - Clothing you are wearing, because the copy would be worn as well.
+  - Clothing you are wearing, because the copy would be worn as well. An item whose clothing
+    record the tool cannot read is not copied either.
   - An item whose record names that one item in another way too: a mission object, an item
     with a GUID of its own (34 of the 1,143 inventory items in the real saves), or an item
     with another item inside it, such as a respirator with its canister.
@@ -457,7 +459,14 @@ Things to know about `copy-item`:
 
 Three checks stand between an edit and a written file. If one fails, nothing is left on disk.
 
-1. The original must pass `tld_save_codec.py verify`.
+1. The original must pass `tld_save_codec.py verify`, and it must hold no nested document
+   that the codec could not open. The game writes a nested document without spaces, and the
+   codec opens every one of those. A document written another way, with spaces between its
+   values for example, stays plain text. The tool then cannot see what is inside it: whether
+   an item is worn, whether the character is on a rope, or where the save holds an instance
+   number. So every edit refuses such a save and names the place. Another editor may have
+   written that document. None of the 14 real saves holds one. Text that is not JSON is
+   left alone, so a journal note in square brackets is no obstacle.
 2. The edited save, decoded again, must differ from the original in exactly what was asked
    for: one value, for `repair-all` one condition for each repaired item, for `remove-item`
    one inventory entry less, for `copy-item` one more, for `set-player` and `set-position`
@@ -800,7 +809,9 @@ Things to know about moving:
 - A number that the save holds already stays as the game wrote it, and the output says
   `Same`. The edit goes ahead when one or more of the other numbers changes.
 - A character in a vehicle, in a snow shelter or on a rope is not moved. `position` says so.
-  One of the 14 real saves has the character in a vehicle.
+  One of the 14 real saves has the character in a vehicle. When the tool cannot read the
+  record of the rope, it does not move the character either, and `position` names the
+  record.
 - The numbers are written as 32-bit floats, the way the game writes them (checked against
   41 of the 42 numbers in the 14 real saves). They may run from -100000 to 100000, and the
   farthest in a real save is 1,980. A number closer to 0 than 0.0001 is refused, because the

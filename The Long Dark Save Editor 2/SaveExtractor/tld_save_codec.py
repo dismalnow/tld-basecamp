@@ -294,6 +294,26 @@ def _open_text(text: str) -> Union[str, NestedJson]:
     return NestedJson(inner)
 
 
+def holds_unread_document(text: str) -> bool:
+    """Whether a text value holds a JSON document that decoding keeps as plain text.
+
+    A text value becomes a NestedJson only when this module can write the document in it back
+    identically. A JSON object or list with spaces between its values, with white space around
+    it, with a repeated field name, or nested too deeply to read stays plain text, and nothing
+    that reads the decoded save looks inside it. Text that is not JSON is ordinary text, also
+    when it begins and ends like a document: "[Day 3] wolves at the dam [twice]".
+    """
+    document = text.strip(" \t\n\r")        # the white space JSON allows around a document
+    if len(document) < 2 or document[0] not in "{[" or document[-1] not in "}]":
+        return False
+    try:
+        _load(document)
+    except SaveFormatError as error:
+        # Not JSON, so not a document. JSON nested too deeply to read is one that stays unread.
+        return isinstance(error.__cause__, RecursionError)
+    return not isinstance(_open_text(text), NestedJson)
+
+
 def _open_nested(value: JsonValue) -> JsonValue:
     if isinstance(value, str):
         return _open_text(value)

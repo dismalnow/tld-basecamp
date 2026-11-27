@@ -785,6 +785,37 @@ def _prove_single_change(original: bytes, edited: bytes, expected: Difference) -
 # The edit
 # ---------------------------------------------------------------------------
 
+def _check_nested_documents(value: JsonValue, path: str = "") -> None:
+    """Refuse a save that holds a nested document the codec kept as plain text.
+
+    The checks that protect an edit read the decoded save: is this item worn, is the character
+    on a rope, does the save hold this instance number in another place. A document that
+    stayed plain text is one they cannot see into, wherever in the save it is.
+    """
+    if isinstance(value, NestedJson):
+        _check_nested_documents(value.value, path)
+    elif isinstance(value, dict):
+        for key, inner in value.items():
+            _check_nested_documents(inner, f"{path} > {key}" if path else key)
+    elif isinstance(value, list):
+        for index, inner in enumerate(value):
+            _check_nested_documents(inner, f"{path}[{index}]")
+    elif isinstance(value, str) and codec.holds_unread_document(value):
+        raise EditError(f"this save holds a nested document at {path} that is not written the way the game "
+                        "writes one, so this tool cannot read it, and the save is not edited. Another editor "
+                        "may have written it")
+
+
+def _decode_for_edit(original: bytes) -> DecodedSave:
+    """Decode a save for an edit, once it passes the exact rebuild check and holds no unread document."""
+    check = codec.verify_save(original)
+    if not check.identical:
+        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
+    save = codec.decode_save(original)
+    _check_nested_documents(save.slot)
+    return save
+
+
 @dataclass(frozen=True)
 class CountEdit:
     data: bytes               # the edited save
@@ -805,10 +836,7 @@ def set_stack_count(original: bytes, prefab: str, count: int, entry: Optional[in
     """
     if not 1 <= count <= MAX_COUNT:
         raise EditError(f"the count must be a whole number from 1 to {MAX_COUNT}, not {count}")
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     chosen, stack, old_count = _select_stack(_inventory_items(save), prefab, entry)
     if old_count == count:
         raise EditError(f"inventory entry {chosen} ({prefab}) already has a count of {count}. "
@@ -841,10 +869,7 @@ def set_item_condition(original: bytes, prefab: str, percent: float,
     if not MIN_CONDITION <= percent <= MAX_CONDITION:
         raise EditError(f"the condition must be a number from {MIN_CONDITION:g} to {MAX_CONDITION:g} "
                         f"(percent), not {percent:g}")
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     chosen, item = _select_item(_inventory_items(save), prefab, entry)
     gear, old = _editable_condition(item, chosen, prefab)
     new = condition_literal(percent)
@@ -887,10 +912,7 @@ def set_item_liters(original: bytes, prefab: str, liters: Decimal, entry: Option
     and when the save holds no amount of liquid for the entry.
     """
     new = stored_liters(liters)
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     chosen, liquid = _select_liquid(_inventory_items(save), prefab, entry)
     if liquid.stored == Decimal(new):
         raise EditError(f"inventory entry {chosen} ({prefab}) already holds {_liters_text(liters)} liters. "
@@ -926,10 +948,7 @@ def set_item_calories(original: bytes, prefab: str, calories: float,
     if not MIN_CALORIES <= calories <= MAX_CALORIES:
         raise EditError(f"the calories must be a number from {MIN_CALORIES:g} to {MAX_CALORIES:g}, "
                         f"not {calories:g}")
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     items = _inventory_items(save)
     chosen, food = _select_food(items, prefab, entry)
     new = float32_literal(calories)
@@ -980,10 +999,7 @@ def set_weapon_rounds(original: bytes, prefab: str, rounds: int, entry: Optional
     """
     if rounds < 0:
         raise EditError(f"the number of rounds must be a whole number from 0 up, not {rounds}")
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     chosen, weapon = _select_weapon(_inventory_items(save), prefab, entry)
     holds = ROUNDS_HELD.get(prefab)
     if holds is None:
@@ -1058,10 +1074,7 @@ def repair_inventory(original: bytes) -> RepairEdit:
     check, when there is nothing to repair, and when the result differs from the original
     in anything but the conditions of the repaired items.
     """
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     repaired: List[Tuple[int, str, str]] = []
     full = ruined = burned = unreadable = 0
     for entry, item in enumerate(_inventory_items(save)):
@@ -1131,6 +1144,25 @@ def _mentions(value: JsonValue, number: int, path: str = "") -> Iterator[str]:
             yield path
 
 
+def _clothing_restriction(gear: Dict[str, JsonValue], worn_reason: str) -> Optional[str]:
+    """Why an item is left alone on account of its clothing record. None when that record is no reason.
+
+    worn_reason is what to say for an item that is worn. A record that is there but is not a
+    nested document with a readable m_WearingProxy is one this tool cannot read, and the item
+    is left alone for that too.
+    """
+    clothing = gear.get("m_ClothingItemSerialized")
+    if clothing is None:
+        return None
+    if isinstance(clothing, NestedJson) and isinstance(clothing.value, dict):
+        worn = clothing.value.get("m_WearingProxy")
+        if worn is True:
+            return worn_reason
+        if worn is None or worn is False:
+            return None
+    return "whether you are wearing it is not stored the way this tool expects"
+
+
 def _why_it_stays(save: DecodedSave, entry: int, prefab: str) -> Optional[str]:
     """The reason this tool does not remove an inventory entry, or None when it may go.
 
@@ -1145,13 +1177,9 @@ def _why_it_stays(save: DecodedSave, entry: int, prefab: str) -> Optional[str]:
     number = int(identity.literal)
     if gear.get(_WATER_RECORD) is not None:
         return "the game keeps the water you carry in this entry. Use set-liters to empty it"
-    clothing = gear.get("m_ClothingItemSerialized")
-    worn = clothing.value.get("m_WearingProxy") if isinstance(clothing, NestedJson) \
-        and isinstance(clothing.value, dict) else None
-    if worn is True:
-        return "you are wearing it in this save. Take it off in the game first"
-    if worn is not None and worn is not False:
-        return "whether you are wearing it is not stored the way this tool expects"
+    reason = _clothing_restriction(gear, "you are wearing it in this save. Take it off in the game first")
+    if reason is not None:
+        return reason
     if abs(number) < 1000:
         return f"its instance number, {number}, is too short to tell apart from other numbers in the save"
     own = _gear_path(entry, "m_InstanceIDProxy")
@@ -1192,10 +1220,7 @@ def remove_item(original: bytes, prefab: str, entry: Optional[int] = None) -> Re
     when the entry is one this tool leaves in place: the water you carry, an item you are
     wearing, and an item whose instance number the save holds in another place as well.
     """
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     items = _inventory_items(save)
     chosen, item = _select_item(items, prefab, entry)
     reason = _why_it_stays(save, chosen, prefab)
@@ -1269,14 +1294,10 @@ def _why_no_copy(item: JsonValue) -> Optional[str]:
         return "its instance number is not stored the way this tool expects"
     if gear.get(_WATER_RECORD) is not None:
         return "the game keeps the water you carry in this entry. Use set-liters to add water"
-    clothing = gear.get("m_ClothingItemSerialized")
-    worn = clothing.value.get("m_WearingProxy") if isinstance(clothing, NestedJson) \
-        and isinstance(clothing.value, dict) else None
-    if worn is True:
-        return ("you are wearing it in this save, and the copy would be worn as well. Take it off in the "
-                "game first")
-    if worn is not None and worn is not False:
-        return "whether you are wearing it is not stored the way this tool expects"
+    reason = _clothing_restriction(gear, "you are wearing it in this save, and the copy would be worn as "
+                                   "well. Take it off in the game first")
+    if reason is not None:
+        return reason
     second = _second_identity(gear)
     if second is not None:
         return ("its record names this one item in another way too, so a copy would not be a second item: "
@@ -1357,10 +1378,7 @@ def copy_item(original: bytes, prefab: str, entry: Optional[int] = None) -> Copy
     entry is one this tool does not copy: the water you carry, an item you are wearing, and an
     item whose record names it in another way besides its instance number.
     """
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     items = _inventory_items(save)
     chosen, item = _select_item(items, prefab, entry)
     reason = _why_no_copy(item)
@@ -1654,10 +1672,7 @@ def set_player_values(original: bytes, values: Dict[str, float]) -> PlayerEdit:
         raise EditError("name one or more of " + ", ".join(PLAYER_VALUES)
                         + (f", not {', '.join(unknown)}" if unknown else ""))
     wanted = {name: stored_player_value(name, value) for name, value in values.items()}
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     document = save.entries.get("global")
     order = list(document) if isinstance(document, dict) else []
 
@@ -1795,10 +1810,7 @@ def set_skill_points(original: bytes, skill: str, points: int) -> SkillEdit:
                         + "The skills are " + ", ".join(SKILLS))
     if isinstance(points, bool) or not isinstance(points, int) or not 0 <= points <= MAX_SKILL_POINTS:
         raise EditError(f"the points must be a whole number from 0 to {MAX_SKILL_POINTS}, not {points}")
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     record = _skill_record(save, skill)
     if record is None:
         raise EditError(f"the skill {skill} is not stored the way this tool expects ({SKILLS[skill]}), so it "
@@ -1915,10 +1927,7 @@ def cure_afflictions(original: bytes) -> CureEdit:
     when one of the kinds is not stored the way this tool expects, when there is nothing to
     cure, and when the result differs from the original in anything but those values.
     """
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     found: Dict[str, Tuple[Dict[str, JsonValue], int]] = {}
     unreadable: List[str] = []
     for name in AFFLICTIONS:
@@ -2008,9 +2017,13 @@ def _held_in_place(save: DecodedSave) -> Optional[str]:
             return meaning if state is True else f"in a state this tool cannot read ({switch})"
     document = save.entries.get("global")
     record = document.get(_ROPE_RECORD) if isinstance(document, dict) else None
-    content = record.value if isinstance(record, NestedJson) else None
-    rope = content.get(_ROPE) if isinstance(content, dict) else None
-    return "on a rope" if isinstance(rope, str) and rope else None
+    if record is None:
+        return None
+    if isinstance(record, NestedJson) and isinstance(record.value, dict):
+        rope = record.value.get(_ROPE)
+        if rope is None or isinstance(rope, str):
+            return "on a rope" if rope else None
+    return f"in a state this tool cannot read ({_ROPE_RECORD})"
 
 
 def read_position(save: DecodedSave) -> Position:
@@ -2059,10 +2072,7 @@ def set_position(original: bytes, values: Dict[str, float]) -> PositionEdit:
         raise EditError("name one or more of " + ", ".join(AXES) + (f", not {unknown[0]}" if unknown else ""))
     for axis, value in values.items():
         _check_coordinate(axis, value)
-    check = codec.verify_save(original)
-    if not check.identical:
-        raise EditError(f"this save does not pass the exact rebuild check, so it is not edited: {check.detail}")
-    save = codec.decode_save(original)
+    save = _decode_for_edit(original)
     numbers = _position_numbers(save)
     if numbers is None:
         raise EditError(f"the position is not stored the way this tool expects ({_PLAYER_MANAGER} > "
