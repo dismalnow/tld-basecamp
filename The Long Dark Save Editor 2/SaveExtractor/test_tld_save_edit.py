@@ -1724,6 +1724,54 @@ def numbered_save(numbers: Sequence[Optional[str]], elsewhere: Sequence[JsonValu
                                        "m_Unknown": NestedJson({"m_Values": list(elsewhere)})})
 
 
+class NestedRemovalTests(unittest.TestCase):
+    def save(self, holder: str, identity: JsonValue = Number("-584372")) -> bytes:
+        save = codec.decode_save(copy_save())
+        inventory = save.entries["global"]["m_Inventory_Serialized"].value
+        items = inventory["m_SerializedItems"]
+        items[1], items[7] = items[7], items[1]
+        gear = edit._gear_of(items[1])
+        assert gear is not None
+        attached = gear["m_RespiratorSerialized"].value["AttachedCanister"]
+        attached["m_InstanceIDProxy"] = identity
+        if holder == "inside":
+            gear["m_AttachedCanisterInstanceID"] = identity
+        elif holder == "another entry":
+            other = edit._gear_of(items[12])
+            assert other is not None
+            other["m_TargetInstanceID"] = "-584372"
+        elif holder == "companion record":
+            items[1]["m_Attachments"] = NestedJson([{"m_InstanceIDProxy": Number("-584374")}])
+            player = save.entries["global"]["m_PlayerManagerSerialized"].value
+            player["m_ItemInHandsInstanceID"] = Number("-584374")
+        elif holder:
+            save.entries["global"]["m_PlayerManagerSerialized"].value[holder] = identity
+        return codec.encode_save(save)
+
+    def test_last_held_canister_stays(self) -> None:
+        with self.assertRaisesRegex(EditError, "an item inside it is the last item you held"):
+            edit.remove_item(self.save("m_LastUnequippedItemInstanceID"), "GEAR_Respirator")
+
+    def test_canister_in_hands_stays(self) -> None:
+        message = "an item inside it is in your hands"
+        for holder in ("m_ItemInHandsInstanceID", "companion record"):
+            with self.subTest(holder=holder), self.assertRaisesRegex(EditError, message):
+                edit.remove_item(self.save(holder), "GEAR_Respirator")
+
+    def test_only_references_inside_the_entry_can_go_with_it(self) -> None:
+        result = edit.remove_item(self.save("inside"), "GEAR_Respirator")
+        self.assertEqual(result.entry, 1)
+        with self.assertRaises(EditError) as caught:
+            edit.remove_item(self.save("another entry"), "GEAR_Respirator")
+        self.assertIn("the save holds the instance number of an item inside it in another place too: "
+                      + ITEMS_PATH + "[12] > m_SerializedGear > m_TargetInstanceID", str(caught.exception))
+
+    def test_short_or_unreadable_nested_identity_is_refused(self) -> None:
+        for identity in (Number("999"), Number("-99"), Number("4.5"), "-584372", None):
+            with self.subTest(identity=identity), self.assertRaisesRegex(EditError, "an item inside it"):
+                edit.remove_item(self.save("", identity), "GEAR_Respirator")
+
+
 class CopyTests(unittest.TestCase):
     def test_adds_exactly_one_entry(self) -> None:
         original = copy_save()

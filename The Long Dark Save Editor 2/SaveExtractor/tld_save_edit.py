@@ -1163,11 +1163,43 @@ def _clothing_restriction(gear: Dict[str, JsonValue], worn_reason: str) -> Optio
     return "whether you are wearing it is not stored the way this tool expects"
 
 
+def _contained_instance_fields(value: JsonValue, outer_gear: Dict[str, JsonValue]) -> Iterator[JsonValue]:
+    """Every instance number an inventory entry holds for an item inside it: all but the entry's own."""
+    if isinstance(value, NestedJson):
+        yield from _contained_instance_fields(value.value, outer_gear)
+    elif isinstance(value, dict):
+        for key, inner in value.items():
+            if key == "m_InstanceIDProxy" and value is not outer_gear:
+                yield inner
+            else:
+                yield from _contained_instance_fields(inner, outer_gear)
+    elif isinstance(value, list):
+        for inner in value:
+            yield from _contained_instance_fields(inner, outer_gear)
+
+
+def _referenced_item_reason(place: str, inside: bool) -> str:
+    """What to say for an entry that stays because the save holds an instance number at place.
+
+    inside says whose number it is: that of an item inside the entry, or the entry's own.
+    """
+    subject = "an item inside it" if inside else "it"
+    if place.endswith("> m_ItemInHandsInstanceID"):
+        return f"{subject} is in your hands in this save. Put it away in the game first"
+    if place.endswith("> m_LastUnequippedItemInstanceID"):
+        return (f"{subject} is the last item you held, and the save remembers it by its number. Hold another "
+                "item in the game and put that away first")
+    identity = "the instance number of an item inside it" if inside else "its instance number"
+    return f"the save holds {identity} in another place too: {place}"
+
+
 def _why_it_stays(save: DecodedSave, entry: int, prefab: str) -> Optional[str]:
     """The reason this tool does not remove an inventory entry, or None when it may go.
 
     An item stays when the game needs it, when it is worn, and when the save holds its
     instance number anywhere else, because that other place would then point at nothing.
+    An item inside it, such as the canister in a respirator, goes with the entry. So the
+    entry also stays when the save holds the number of an item inside it outside the entry.
     """
     items = _inventory_items(save)
     gear = _gear_of(items[entry])
@@ -1184,14 +1216,20 @@ def _why_it_stays(save: DecodedSave, entry: int, prefab: str) -> Optional[str]:
         return f"its instance number, {number}, is too short to tell apart from other numbers in the save"
     own = _gear_path(entry, "m_InstanceIDProxy")
     elsewhere = next((place for place in _mentions(save.slot, number) if place != own), None)
-    if elsewhere is None:
-        return None
-    if elsewhere.endswith("> m_ItemInHandsInstanceID"):
-        return "it is in your hands in this save. Put it away in the game first"
-    if elsewhere.endswith("> m_LastUnequippedItemInstanceID"):
-        return ("it is the last item you held, and the save remembers it by its number. Hold another item in "
-                "the game and put that away first")
-    return f"the save holds its instance number in another place too: {elsewhere}"
+    if elsewhere is not None:
+        return _referenced_item_reason(elsewhere, inside=False)
+    item_path = f"{_items_path()}[{entry}]"
+    for inner in _contained_instance_fields(items[entry], gear):
+        if not isinstance(inner, Number) or not _SIGNED_WHOLE.fullmatch(inner.literal):
+            return "the instance number of an item inside it is not stored the way this tool expects"
+        number = int(inner.literal)
+        if abs(number) < 1000:
+            return (f"the instance number of an item inside it, {number}, is too short to tell apart from "
+                    "other numbers in the save")
+        for place in _mentions(save.slot, number):
+            if place != item_path and not place.startswith(item_path + " > "):
+                return _referenced_item_reason(place, inside=True)
+    return None
 
 
 def _prove_removal(original: bytes, edited: bytes, entry: int) -> None:
