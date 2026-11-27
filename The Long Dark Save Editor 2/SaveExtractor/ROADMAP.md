@@ -68,7 +68,7 @@ game.
 | Nested numbers | `remove-item` also checks the instance number of an item inside the entry, such as the canister in a respirator. Before, the entry was removed even when the save still pointed at the item inside it | Done (pull request 26) |
 | Liters | `set-liters` refuses to change an amount written with a decimal point or an exponent, which is not how the game writes it, because its unit cannot be known. A new amount with more than nine decimal places is refused however many digits it has | Done (pull request 27). The 14 real saves hold 8 such amounts among 33, in the two saves that carry the marks of the C# editor |
 | Copy number range | `copy-item` refuses when the instance number for the copy would fall below the lowest number a 32-bit field holds | Done (pull request 28) |
-| Dead at zero | `set-player` refuses to change a condition of zero or less, as it already refused a missing one | Written. In review |
+| Dead at zero | `set-player` refuses to change a condition of zero or less, as it already refused a missing one | Done (pull request 29) |
 
 ## What holds for every block
 

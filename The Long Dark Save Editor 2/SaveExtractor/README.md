@@ -595,8 +595,8 @@ Things to know about the player's values:
   Checked:  the number that was put in is the first in its record, where the game writes it, and nothing else in that record differs
   ```
 
-  A save that holds no condition is the exception. That is the save of a dead character, and
-  the tool does not bring it back.
+  The condition is the exception. A save that holds no condition, or a condition of zero or
+  less, is the save of a dead character, and the tool does not bring it back.
 - The numbers are written as 32-bit floats, the way the game writes them (checked against
   all 62 numbers that the 14 real saves hold for these five values).
 - Only the numbers change. Next to each one the save keeps what the character last said
