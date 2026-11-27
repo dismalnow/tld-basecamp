@@ -457,7 +457,9 @@ Things to know about `copy-item`:
   for each kind of item, and it is not built yet: see `ROADMAP.md`.
 - The copy gets an instance number of its own. The number is even and negative, as every
   number the game hands out while it runs is in the real saves (4,647 of them). It is below
-  every number in the inventory, and the save holds it nowhere else.
+  every number in the inventory, and the save holds it nowhere else. An instance number is a
+  32-bit whole number, so the copy is refused when no number of -2147483648 or above is
+  left for it. The lowest number in the 14 real saves is near -5.2 million.
 - The tool does not copy some items, and says why:
   - The two entries that hold the water you carry. Use `set-liters` to add water.
   - Clothing you are wearing, because the copy would be worn as well. An item whose clothing

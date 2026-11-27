@@ -1832,6 +1832,16 @@ class CopyTests(unittest.TestCase):
                 result = edit.copy_item(copy_save(), prefab, entry=entry)
                 self.assertEqual(result.data, copy_save(copy_of=entry))
 
+    def test_copy_refuses_an_instance_number_below_the_game_range(self) -> None:
+        lowest = "-2147483648"
+        legal = edit.copy_item(numbered_save(["-2147483646"]), "GEAR_Stone")
+        self.assertEqual(legal.new_number, lowest)
+        message = "the inventory holds instance numbers so low that no lower one is left for the copy"
+        for reason, save in (("at the limit", numbered_save([lowest])),
+                             ("last number taken", numbered_save(["-2147483646"], [lowest]))):
+            with self.subTest(reason=reason), self.assertRaisesRegex(EditError, message):
+                edit.copy_item(save, "GEAR_Stone")
+
     def test_the_new_instance_number_is_even_negative_below_the_others_and_unused(self) -> None:
         cases = (
             (["-10", "-4"], [], -12),

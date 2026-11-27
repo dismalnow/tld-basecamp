@@ -1367,11 +1367,16 @@ def _whole_numbers(value: JsonValue) -> Iterator[int]:
             yield int(literal)
 
 
+# An instance number is a 32-bit whole number in the game, so this is the lowest one there is.
+_LOWEST_INSTANCE_NUMBER = -2_147_483_648
+
+
 def _unused_number(save: DecodedSave) -> int:
     """An instance number for a new inventory item.
 
     It is even and negative, as every number the game hands out while it runs is in the real
     saves. It is below every instance number in the inventory, and the save holds it nowhere.
+    Raises EditError when no such number is left.
     """
     carried = [0]
     for gear in map(_gear_of, _inventory_items(save)):
@@ -1383,6 +1388,8 @@ def _unused_number(save: DecodedSave) -> int:
     candidate = lowest - 2 - lowest % 2
     while candidate in taken:
         candidate -= 2
+    if candidate < _LOWEST_INSTANCE_NUMBER:
+        raise EditError("the inventory holds instance numbers so low that no lower one is left for the copy")
     return candidate
 
 
