@@ -258,7 +258,7 @@ def liquid_item(prefab: str, record_field: Optional[str] = None,
     return made
 
 
-def liquids_save() -> bytes:
+def liquids_save(lamp_amount: str = "1E+09") -> bytes:
     """A save whose inventory holds liquid in every form real saves show, and items that hold none."""
     fuel = "m_LiquidItemSerialized"
     items: List[JsonValue] = [
@@ -275,7 +275,7 @@ def liquids_save() -> bytes:
         # 4: a lamp, with its fuel in the form the C# editor writes
         liquid_item("GEAR_KeroseneLampB", "m_KeroseneLampItemSerialized",
                     NestedJson({"m_HoursPlayed": Number("1583.43872"),
-                                "m_CurrentFuelLitersProxy": Number("1E+09")})),
+                                "m_CurrentFuelLitersProxy": Number(lamp_amount)})),
         # 5: an amount the game has not set
         liquid_item("GEAR_BottleHydrogenPeroxide", fuel,
                     NestedJson({"m_LiquidLitersProxy": Number("-214748364800000"),
@@ -298,6 +298,41 @@ def liquid_path(entry: int, fields: str) -> str:
 def amount_in(save_bytes: bytes, entry: int, record_field: str, amount_field: str) -> JsonValue:
     items = codec.decode_save(save_bytes).entries["global"]["m_Inventory_Serialized"].value["m_SerializedItems"]
     return items[entry]["m_SerializedGear"].value[record_field].value[amount_field]
+
+
+def liquid_literal(items: Sequence[JsonValue], liquid: Liquid) -> str:
+    found = edit._liquid_of(items[liquid.entry])
+    assert found is not None
+    return found.literal
+
+
+def check_ambiguous_liquid(case: unittest.TestCase, original: bytes, liquid: Liquid, literal: str) -> None:
+    with case.assertRaises(EditError) as refused:
+        edit.set_item_liters(original, liquid.prefab, Decimal("0.25"), entry=liquid.entry)
+    case.assertEqual(str(refused.exception),
+                     f"inventory entry {liquid.entry} ({liquid.prefab}) holds the amount {literal}, which is "
+                     "not written the way the game writes it: as a whole number of billionths of a liter. "
+                     "This tool cannot tell whether it means liters or billionths, so it is not changed. "
+                     "Another editor may have written it")
+
+
+class ExactLiquidTests(unittest.TestCase):
+    def test_listed_amounts_with_ambiguous_units_are_refused(self) -> None:
+        for literal in ("0.5", "3.0", "0.0", "4E+08", "4.112937E+08", "-2.14748365E+14"):
+            with self.subTest(literal=literal):
+                original = liquids_save(lamp_amount=literal)
+                lamp = next(item for item in edit.list_liquids(codec.decode_save(original)) if item.entry == 4)
+                check_ambiguous_liquid(self, original, lamp, literal)
+
+    def test_new_amount_must_fit_exactly_in_billionths(self) -> None:
+        original = liquids_save()
+        target = "GEAR_BottleHydrogenPeroxide"
+        for given, wanted in (("1.000000001", "1000000001"), ("2.500000000000", "2500000000")):
+            result = edit.set_item_liters(original, target, Decimal(given))
+            self.assertEqual((result.old_amount, result.new_amount), ("-214748364800000", wanted))
+        for given in ("1.0000000000000000000000000001", "1e-1000100"):
+            with self.subTest(given=given), self.assertRaisesRegex(EditError, "nine decimal places"):
+                edit.set_item_liters(original, target, Decimal(given))
 
 
 class LiquidListTests(unittest.TestCase):
@@ -350,9 +385,9 @@ class SetLitersTests(unittest.TestCase):
         for prefab, entry, fields, old in (
                 ("GEAR_LampFuel", 3, "m_LiquidItemSerialized > m_LiquidLitersProxy", "500000000"),
                 ("GEAR_KeroseneLampB", None, "m_KeroseneLampItemSerialized > m_CurrentFuelLitersProxy",
-                 "1E+09")):
+                 "1000000000")):
             with self.subTest(prefab=prefab):
-                original = liquids_save()
+                original = liquids_save(lamp_amount="1000000000")
                 result = edit.set_item_liters(original, prefab, Decimal("0.25"), entry=entry)
                 found = list(edit.differences(codec.decode_save(original).slot,
                                               codec.decode_save(result.data).slot))
@@ -400,7 +435,7 @@ class SetLitersTests(unittest.TestCase):
         for prefab, liters in (("GEAR_WaterSupplyPotable", "1.9048"), ("GEAR_KeroseneLampB", "1")):
             with self.subTest(prefab=prefab):
                 with self.assertRaises(EditError) as refused:
-                    edit.set_item_liters(liquids_save(), prefab, Decimal(liters))
+                    edit.set_item_liters(liquids_save(lamp_amount="1000000000"), prefab, Decimal(liters))
                 self.assertIn(f"already holds {liters} liters. Nothing to change", str(refused.exception))
 
     def test_amounts_out_of_range_are_refused_before_the_save_is_read(self) -> None:
@@ -4887,10 +4922,13 @@ class RealSaveTests(unittest.TestCase):
         for path in saves:
             with self.subTest(save=path.name):
                 original = path.read_bytes()
-                before = edit.list_liquids(codec.decode_save(original))
-                if not before:
+                save = codec.decode_save(original)
+                items = edit._inventory_items(save)
+                before = edit.list_liquids(save)
+                target = next((liquid for liquid in before
+                               if liquid_literal(items, liquid).lstrip("-").isdigit()), None)
+                if target is None:
                     continue
-                target = before[0]
                 liters = Decimal("0.125") if target.liters != Decimal("0.125") else Decimal("0.25")
                 result = edit.set_item_liters(original, target.prefab, liters, entry=target.entry)
                 self.assertEqual(result.unchanged_entries, result.entries - 1)
@@ -4900,7 +4938,18 @@ class RealSaveTests(unittest.TestCase):
                                    else liquid.liters) for liquid in before]
                 self.assertEqual(after, expected)
                 edited += 1
-        self.assertTrue(edited, "no real save holds an item with liquid")
+        self.assertTrue(edited, "no real save holds liquid stored as whole billionths")
+
+    def test_each_real_liquid_with_ambiguous_units_is_refused(self) -> None:
+        for path in codec.find_saves(Path(os.environ["TLD_SAVE_DIR"])):
+            original = path.read_bytes()
+            save = codec.decode_save(original)
+            items = edit._inventory_items(save)
+            for liquid in edit.list_liquids(save):
+                literal = liquid_literal(items, liquid)
+                if not literal.lstrip("-").isdigit():
+                    with self.subTest(save=path.name, entry=liquid.entry, literal=literal):
+                        check_ambiguous_liquid(self, original, liquid, literal)
 
     def test_every_amount_of_liquid_in_a_real_inventory_can_be_read(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])

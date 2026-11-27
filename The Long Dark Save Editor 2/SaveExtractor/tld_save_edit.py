@@ -93,7 +93,7 @@ import re
 import struct
 import sys
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
@@ -229,6 +229,7 @@ def list_stacks(save: DecodedSave) -> List[Stack]:
 
 # The game stores an amount of liquid as a whole number of billionths of a liter.
 _BILLION = 1_000_000_000
+_SIGNED_WHOLE = re.compile(r"-?[0-9]+")
 
 # Where an inventory item keeps the liquid it holds: (the record, the amount in that record).
 _LIQUID_FIELDS = (
@@ -899,21 +900,30 @@ def stored_liters(liters: Decimal) -> str:
     """The stored form of an amount given in liters: a whole number of billionths of a liter."""
     if not liters.is_finite() or not 0 <= liters <= MAX_LITERS:
         raise EditError(f"the amount must be a number of liters from 0 to {MAX_LITERS}, not {liters}")
-    billionths = liters * _BILLION
-    if billionths != billionths.to_integral_value():
+    # Three digits for whole liters and nine for the fraction cover the entire allowed range.
+    context = Context(prec=12)
+    exact = context.quantize(liters, Decimal("0.000000001"))
+    if liters != exact:
         raise EditError(f"the game stores liters to nine decimal places, and {liters} has more")
-    return str(int(billionths))
+    return str(int(context.multiply(exact, _BILLION)))
 
 
 def set_item_liters(original: bytes, prefab: str, liters: Decimal, entry: Optional[int] = None) -> LitersEdit:
     """Return the save with the liquid one inventory entry holds changed. Reads and writes no file.
 
     The amount is given in liters. Raises EditError under the same rules as set_stack_count,
-    and when the save holds no amount of liquid for the entry.
+    when the save holds no amount of liquid for the entry, and when it holds one that is not
+    written as a whole number: the game writes billionths of a liter, and a number with a
+    decimal point or an exponent could mean either liters or billionths.
     """
     new = stored_liters(liters)
     save = _decode_for_edit(original)
     chosen, liquid = _select_liquid(_inventory_items(save), prefab, entry)
+    if not _SIGNED_WHOLE.fullmatch(liquid.literal):
+        raise EditError(f"inventory entry {chosen} ({prefab}) holds the amount {liquid.literal}, which is not "
+                        "written the way the game writes it: as a whole number of billionths of a liter. This "
+                        "tool cannot tell whether it means liters or billionths, so it is not changed. Another "
+                        "editor may have written it")
     if liquid.stored == Decimal(new):
         raise EditError(f"inventory entry {chosen} ({prefab}) already holds {_liters_text(liters)} liters. "
                         "Nothing to change")
@@ -1105,8 +1115,6 @@ def repair_inventory(original: bytes) -> RepairEdit:
     entries, unchanged = _prove_changes(original, edited, expected)
     return RepairEdit(edited, tuple(repaired), full, ruined, burned, unreadable, entries, unchanged)
 
-
-_SIGNED_WHOLE = re.compile(r"-?[0-9]+")
 
 # The game keeps the water you carry in two inventory entries, and every real save has both.
 _WATER_RECORD = "m_WaterSupplySerialized"
