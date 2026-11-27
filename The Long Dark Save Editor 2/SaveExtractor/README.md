@@ -210,6 +210,15 @@ half-liter bottle, and what the game makes of that is untested. An item whose re
 no amount at all, such as unsafe water when you carry none, is refused, because setting it
 would add a field and not change a value.
 
+The game writes an amount as a whole number of billionths of a liter, and so does
+`set-liters`: 2.5 liters is `2500000000`. An amount with a decimal point or an exponent,
+such as `3.0` or `4E+08`, is not written the way the game writes it. The old C# editor
+keeps these amounts as liters, so the tool cannot tell whether such a number means liters
+or billionths. `liquids` lists it as billionths, like every other amount, and `set-liters`
+refuses to change it. The 14 real saves hold 8 such amounts among 33, all of them in the
+two saves that carry the marks of the C# editor. A new amount with more than nine decimal
+places is refused as well, however many digits it has. Zeros at the end do not count.
+
 ### Calories
 
 Not tested in the game yet: nobody has loaded a save changed by `set-calories`. Try it on a
