@@ -205,6 +205,34 @@ class GameCheckTests(unittest.TestCase):
                 apply.running_process_names()
 
 
+class EntryTableTests(FolderCase):
+    def refused(self, names: Sequence[str], detail: str) -> None:
+        proposed = codec.decode_save(self.edited_data)
+        proposed.slot[codec.ENTRY_TABLE] = {name: proposed.entries.get(name, {}) for name in names}
+        self.edited.write_bytes(codec.encode_save(proposed))
+        with self.assertRaises(ApplyError) as caught:
+            apply.plan_apply(self.live, self.edited, self.backups, now=NOW)
+        self.assertIn(f"{self.edited.name} does not hold the entries that {self.live.name} holds: {detail}",
+                      str(caught.exception))
+        self.assert_nothing_changed()
+
+    def test_empty_table(self) -> None:
+        self.refused([], "it lacks boot, global, LakeRegion")
+
+    def test_missing_entry(self) -> None:
+        self.refused(["boot", "LakeRegion"], "it lacks global")
+
+    def test_extra_entry(self) -> None:
+        self.refused(["boot", "global", "LakeRegion", "Cabin"], "it has extra entries Cabin")
+
+    def test_order_changed(self) -> None:
+        self.refused(["global", "boot", "LakeRegion"], "the order differs")
+
+    def test_missing_and_extra_names_keep_their_order(self) -> None:
+        self.refused(["Ravine", "Valley", "global"],
+                     "it lacks boot, LakeRegion. It has extra entries Ravine, Valley")
+
+
 class ApplyTests(FolderCase):
     def test_the_edited_save_is_put_in_place_after_a_backup(self) -> None:
         plan = apply.plan_apply(self.live, self.edited, self.backups, now=NOW)

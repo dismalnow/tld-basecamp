@@ -17,11 +17,13 @@ apply refuses unless all of this holds:
     2. SAVE and EDITED_FILE both pass the exact rebuild check (tld_save_codec.py verify).
     3. EDITED_FILE was made from SAVE as it is now: the same save, not written by the game
        since. Otherwise putting it in place would undo what the game saved later.
+    4. EDITED_FILE holds the same entries as SAVE (boot, global, and one per scene), in the
+       same order.
 It then lists what differs between SAVE and EDITED_FILE: the inventory entries that went or
 came, and every other value. After that it works in this order and stops at the first step
 that fails:
-    4. Copy SAVE into the backup folder under a new name, and read the copy back.
-    5. Put the edited content in place of SAVE in one step, and read SAVE back.
+    5. Copy SAVE into the backup folder under a new name, and read the copy back.
+    6. Put the edited content in place of SAVE in one step, and read SAVE back.
 
 restore puts a backup back the same way. Whatever SAVE holds at that moment is backed up
 first, so a restore can be undone too. backups lists the backups of one save, newest first.
@@ -177,6 +179,25 @@ def _require_same_game_save(current: DecodedSave, edited: DecodedSave, live: Pat
                      + (", ".join(changed) or "the order of the fields"))
 
 
+def _require_same_entries(current: DecodedSave, edited: DecodedSave, live: Path, edited_name: str) -> None:
+    """The edited file must hold the entries of the live save, by name and in the same order.
+
+    A file that passes the rebuild check can still hold an empty entry table, or lack a scene.
+    """
+    before, after = current.entries, edited.entries
+    if list(before) == list(after):
+        return
+    missing = [name for name in before if name not in after]
+    extra = [name for name in after if name not in before]
+    details = ["it lacks " + ", ".join(missing)] if missing else []
+    if extra:
+        details.append(("It" if details else "it") + " has extra entries " + ", ".join(extra))
+    detail = ". ".join(details) or "the order differs"
+    raise ApplyError(f"{edited_name} does not hold the entries that {live.name} holds: {detail}. "
+                     "tld_save_edit.py never adds, removes or moves an entry, so this file did not come "
+                     "from it")
+
+
 # ---------------------------------------------------------------------------
 # Working out what to do. Nothing in this section changes a file.
 # ---------------------------------------------------------------------------
@@ -230,6 +251,7 @@ def plan_apply(live: Path, edited: Path, backup_dir: Path, now: Optional[datetim
     proposed = _decode_exact(new_data, edited.name)
     _require_copy_of(proposed, edited.name, live)
     _require_same_game_save(current, proposed, live, edited.name)
+    _require_same_entries(current, proposed, live, edited.name)
     found = edit.compare_saves(current, proposed)
     if not (found.changes or found.removed or found.added):
         raise ApplyError(f"{edited.name} holds exactly what {live.name} already holds. Nothing to put in place")

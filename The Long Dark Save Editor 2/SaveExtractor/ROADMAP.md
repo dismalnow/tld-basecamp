@@ -49,6 +49,27 @@ change finishes or advances an item, update this file in the same pull request.
 | Cure afflictions | Built (pull request 19) for the five kinds that a real save has shown in use or that are stored the same way: hypothermia, sprain pain, sprained ankles, sprained wrists and burns. `afflictions` lists them, and `cure` ends every case. Not tested in game. Other afflictions wait for a save that holds one |
 | Position | Built (pull request 20): `position` prints the scene and where the character stands, and `set-position` moves the character inside that scene. Not tested in game. The tool does not know the ground, so the numbers have to come from a spot that is known to be good |
 
+## Review fixes
+
+On 2026-11-25 Codex, a coding agent that had not written this code, reviewed the edits that
+are not tested in game and the `apply` command. It reported ten findings. Each one was
+checked on copies of real saves or in the code, and all ten hold. Codex then wrote nine
+fixes from written instructions. Each fix is checked again and merged as a pull request of
+its own. None of them is a new kind of edit, so none adds to what waits for a test in the
+game.
+
+| Fix | What it changes | State |
+|---|---|---|
+| Entry table | `apply` refuses a file that does not hold the entries of the live save, by name and in the same order. Before, a file with no entries at all passed every check | Done (pull request 21) |
+| Preview fields | The `apply` preview lists a field that was put in or taken out with its value. Before, it gave two lists of field names and no numbers | Written. In review |
+| Pairing | The `apply` preview matches inventory entries by instance number and item name. Before, a copy that got the number of a removed item was shown as that item with other values | Written. In review |
+| Last change | `apply` refuses a file that would undo the last `apply` or `restore`, which it finds by comparing with the newest backup. `--allow-undo` puts such a file in place all the same. Before, two files made from one save could be put in place one after the other, and the second undid the first without a word | Written. In review |
+| Unread documents | Every edit refuses a save that holds a nested document the codec could not open, and the checks for worn clothing and for a rope refuse a record they cannot read. Before, such a record counted as not worn and no rope | Written. In review |
+| Nested numbers | `remove-item` also checks the instance number of an item inside the entry, such as the canister in a respirator. Before, the entry was removed even when the save still pointed at the item inside it | Written. In review |
+| Liters | `set-liters` refuses to change an amount written with a decimal point or an exponent, which is not how the game writes it, because its unit cannot be known. A new amount with more than nine decimal places is refused however many digits it has | Written. In review |
+| Copy number range | `copy-item` refuses when the instance number for the copy would fall below the lowest number a 32-bit field holds | Written. In review |
+| Dead at zero | `set-player` refuses to change a condition of zero or less, as it already refused a missing one | Written. In review |
+
 ## What holds for every block
 
 - A new kind of edit counts as "not tested in game" until the owner has loaded an edited
