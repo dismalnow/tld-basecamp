@@ -843,11 +843,16 @@ To undo:    python tld_save_apply.py restore "C:\Users\you\AppData\Local\Hinterl
    save whenever it writes it, so the tool can tell when the game has saved since the edit
    was made. It then refuses, because putting the file in place would undo what the game
    saved. Make the edit again from the current save.
+4. The edited file holds the same entries as the live save (`boot`, `global`, and one for
+   each scene), in the same order. `tld_save_edit.py` never adds, removes or moves an entry,
+   so a file with other entries did not come from it. The refusal names the entries that
+   are missing or extra. A file with no entries at all passes the three checks above, and
+   this one stops it.
 
 Then it works in this order and stops at the first step that fails:
 
-4. The live save is copied to the backup folder under a new name, and the copy is read back.
-5. The edited content is put in place of the live save in one step, and the save is read
+5. The live save is copied to the backup folder under a new name, and the copy is read back.
+6. The edited content is put in place of the live save in one step, and the save is read
    back.
 
 To see the backups of a save and put one back:
