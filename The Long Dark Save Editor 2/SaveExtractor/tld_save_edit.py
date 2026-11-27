@@ -660,32 +660,53 @@ def _show(value: JsonValue) -> str:
 
 
 def differences(before: JsonValue, after: JsonValue, path: str = "",
-                matched: Optional[Tuple[str, Sequence[Tuple[int, int]]]] = None) -> Iterator[Difference]:
+                matched: Optional[Tuple[str, Sequence[Tuple[int, int]]]] = None, *,
+                each_field: bool = False) -> Iterator[Difference]:
     """Every place where two decoded values differ, as (path, before, after).
 
     A list is compared position by position, and a list whose length changed is one
     difference. matched names one list by its path and says which of its positions belong
     together, as pairs of a position in before and a position in after. Only those pairs
     are compared in that list, each under its position in before.
+
+    Two objects that do not hold the same fields in the same order are one difference, which
+    names the fields of both. That is what an edit is proven against. With each_field, which
+    is for showing a person what differs, they are taken apart: a field that only one of them
+    holds is a difference of its own, with "(left out)" on the other side, the fields that
+    both hold are compared one by one, and another order of those is one more difference.
     """
     if isinstance(before, NestedJson) and isinstance(after, NestedJson):
-        yield from differences(before.value, after.value, path, matched)
+        yield from differences(before.value, after.value, path, matched, each_field=each_field)
     elif isinstance(before, dict) and isinstance(after, dict):
         if list(before) != list(after):
-            yield (path, "fields " + ", ".join(before), "fields " + ", ".join(after))
-            return
-        for key in before:
-            yield from differences(before[key], after[key], f"{path} > {key}" if path else key, matched)
+            if not each_field:
+                yield (path, "fields " + ", ".join(before), "fields " + ", ".join(after))
+                return
+            previous = [key for key in before if key in after]
+            current = [key for key in after if key in before]
+            if previous != current:
+                yield (path, "fields in the order " + ", ".join(previous),
+                       "fields in the order " + ", ".join(current))
+            for key in before:
+                if key not in after:
+                    yield (f"{path} > {key}" if path else key, _show(before[key]), "(left out)")
+        for key in after:
+            field_path = f"{path} > {key}" if path else key
+            if key in before:
+                yield from differences(before[key], after[key], field_path, matched, each_field=each_field)
+            else:
+                yield (field_path, "(left out)", _show(after[key]))
     elif isinstance(before, list) and isinstance(after, list):
         if matched is not None and path == matched[0]:
             for left, right in matched[1]:
-                yield from differences(before[left], after[right], f"{path}[{left}]")
+                yield from differences(before[left], after[right], f"{path}[{left}]", matched,
+                                       each_field=each_field)
             return
         if len(before) != len(after):
             yield (path, f"{len(before)} items", f"{len(after)} items")
             return
         for position, (left, right) in enumerate(zip(before, after)):
-            yield from differences(left, right, f"{path}[{position}]", matched)
+            yield from differences(left, right, f"{path}[{position}]", matched, each_field=each_field)
     elif type(before) is not type(after) or before != after:
         yield (path, _show(before), _show(after))
 
@@ -1402,7 +1423,7 @@ def compare_saves(before: DecodedSave, after: DecodedSave) -> SaveComparison:
     same entries in the same order the result is the same either way.
     """
     def position_by_position() -> SaveComparison:
-        return SaveComparison((), (), tuple(differences(before.slot, after.slot)))
+        return SaveComparison((), (), tuple(differences(before.slot, after.slot, each_field=True)))
 
     def only_in(items: List[JsonValue], kept: Set[int]) -> Tuple[Tuple[int, str], ...]:
         return tuple((entry, _prefab_of(item) or "an item without a name")
@@ -1419,7 +1440,7 @@ def compare_saves(before: DecodedSave, after: DecodedSave) -> SaveComparison:
     pairs = [(place[number], entry) for entry, number in enumerate(new_numbers) if number in place]
     if any(first[0] > second[0] for first, second in zip(pairs, pairs[1:])):
         return position_by_position()
-    changes = tuple(differences(before.slot, after.slot, matched=(_items_path(), pairs)))
+    changes = tuple(differences(before.slot, after.slot, matched=(_items_path(), pairs), each_field=True))
     return SaveComparison(only_in(old_items, {left for left, _ in pairs}),
                           only_in(new_items, {right for _, right in pairs}), changes)
 

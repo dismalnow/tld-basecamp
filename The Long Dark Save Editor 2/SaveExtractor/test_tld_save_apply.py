@@ -650,6 +650,15 @@ class CommandTests(FolderCase):
         self.assertEqual(len(found), 1, found)
         return found[0]
 
+    def test_preview_shows_an_inserted_value(self) -> None:
+        save = codec.decode_save(self.original)
+        save.entries["global"]["m_NewField"] = Number("40")
+        self.edited.write_bytes(codec.encode_save(save))
+        code, out, err = self.run_command(*self.apply_arguments("--dry-run"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("m_Dict > global > m_NewField: (left out) -> 40", out)
+        self.assert_nothing_changed()
+
     def test_apply_says_what_it_did_and_how_to_undo_it(self) -> None:
         code, out, err = self.run_command(*self.apply_arguments())
         self.assertEqual((code, err), (0, ""))
