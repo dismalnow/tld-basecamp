@@ -1413,9 +1413,10 @@ def compare_saves(before: DecodedSave, after: DecodedSave) -> SaveComparison:
 
     differences() compares a list position by position. That is wrong for an inventory with
     an entry added or removed, because every entry behind it has moved. So the entries of the
-    two inventories are matched by instance number here. An entry that only one save holds is
-    listed as removed or added, and an entry that both hold is compared under its entry number
-    in the first save.
+    two inventories are matched here: two entries belong together when they have the same
+    instance number and the same item name. The name counts because copy-item can hand out a
+    number that a removed item had. An entry that only one save holds is listed as removed or
+    added, and an entry that both hold is compared under its entry number in the first save.
 
     When the entries cannot be matched (an instance number is missing or occurs twice, or the
     entries both saves hold are in another order), nothing is listed as removed or added, and
@@ -1437,7 +1438,8 @@ def compare_saves(before: DecodedSave, after: DecodedSave) -> SaveComparison:
     if old_numbers is None or new_numbers is None:
         return position_by_position()
     place = {number: entry for entry, number in enumerate(old_numbers)}
-    pairs = [(place[number], entry) for entry, number in enumerate(new_numbers) if number in place]
+    pairs = [(place[number], entry) for entry, number in enumerate(new_numbers)
+             if number in place and _prefab_of(old_items[place[number]]) == _prefab_of(new_items[entry])]
     if any(first[0] > second[0] for first, second in zip(pairs, pairs[1:])):
         return position_by_position()
     changes = tuple(differences(before.slot, after.slot, matched=(_items_path(), pairs), each_field=True))

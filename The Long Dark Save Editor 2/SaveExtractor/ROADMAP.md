@@ -62,7 +62,7 @@ game.
 |---|---|---|
 | Entry table | `apply` refuses a file that does not hold the entries of the live save, by name and in the same order. Before, a file with no entries at all passed every check | Done (pull request 21) |
 | Preview fields | The `apply` preview lists a field that was put in or taken out with its value. Before, it gave two lists of field names and no numbers | Done (pull request 22). A list that is longer or shorter than before is still one line with the two lengths |
-| Pairing | The `apply` preview matches inventory entries by instance number and item name. Before, a copy that got the number of a removed item was shown as that item with other values | Written. In review |
+| Pairing | The `apply` preview matches inventory entries by instance number and item name. Before, a copy that got the number of a removed item was shown as that item with other values | Done (pull request 23) |
 | Last change | `apply` refuses a file that would undo the last `apply` or `restore`, which it finds by comparing with the newest backup. `--allow-undo` puts such a file in place all the same. Before, two files made from one save could be put in place one after the other, and the second undid the first without a word | Written. In review |
 | Unread documents | Every edit refuses a save that holds a nested document the codec could not open, and the checks for worn clothing and for a rope refuse a record they cannot read. Before, such a record counted as not worn and no rope | Written. In review |
 | Nested numbers | `remove-item` also checks the instance number of an item inside the entry, such as the canister in a respirator. Before, the entry was removed even when the save still pointed at the item inside it | Written. In review |

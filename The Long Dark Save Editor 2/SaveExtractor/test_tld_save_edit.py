@@ -1978,6 +1978,14 @@ class CompareSavesTests(unittest.TestCase):
                 found = self.compare(carried_save(), carried_save(more))
                 self.assertEqual(found, edit.SaveComparison((), ((position, "GEAR_Rope"),), ()))
 
+    def test_copy_reusing_a_removed_items_number_is_a_new_entry(self) -> None:
+        before = carried_save([("GEAR_Stick", "-2000", "1.0"), ("GEAR_Hatchet", "-2002", "1.0")])
+        without_hatchet = edit.remove_item(before, "GEAR_Hatchet").data
+        new_stick = edit.copy_item(without_hatchet, "GEAR_Stick")
+        self.assertEqual(new_stick.new_number, "-2002")
+        self.assertEqual(self.compare(before, new_stick.data),
+                         edit.SaveComparison(((1, "GEAR_Hatchet"),), ((1, "GEAR_Stick"),), ()))
+
     def test_one_entry_gone_and_one_new_leave_the_others_in_place(self) -> None:
         after = carried_save(without(CARRIED, 1) + [ROPE])
         self.assertEqual(self.compare(carried_save(), after),
