@@ -3828,8 +3828,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
         self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset())
-        self.assertEqual(edit.CURE_NOT_TESTED_IN_GAME,
-                         frozenset({"hypothermia", "sprain-pain", "sprained-ankle"}))
+        self.assertEqual(edit.CURE_NOT_TESTED_IN_GAME, frozenset())
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -4630,11 +4629,9 @@ class CommandTests(unittest.TestCase):
             "Checked:  the edited save differs from the original in exactly these 9 values",
             "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
         ])
-        self.assertEqual(lines[6], "Untested: no save in which cure ended hypothermia or sprain-pain has been "
-                                   "loaded in the game yet. Try it on a save you can afford to lose")
-        self.assertEqual(lines[7], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
-        self.assertEqual(lines[8], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
-        self.assertEqual(lines[9:], ["sandbox15 itself was not changed."])
+        self.assertEqual(lines[6], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[7], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[8:], ["sandbox15 itself was not changed."])
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
         self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
@@ -4649,24 +4646,29 @@ class CommandTests(unittest.TestCase):
             "Checked:  the edited save differs from the original in exactly this one value",
         ])
 
-    def test_cure_of_kinds_seen_in_the_game_does_not_say_untested(self) -> None:
-        self.save.write_bytes(afflictions_save(burns=True, wrists=1))
+    def test_cure_of_all_five_kinds_does_not_say_untested(self) -> None:
+        # All five were loaded in the game on 2026-11-27.
+        self.save.write_bytes(afflictions_save(hypothermia=True, burns=True, pain=1, ankles=1, wrists=1))
         code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
         self.assertEqual(code, 0, err)
-        self.assertIn("Cured:    sprained-wrist, 1 case", out)
-        self.assertIn("Cured:    burns, 1 case", out)
+        for name in edit.AFFLICTIONS:
+            self.assertIn(f"Cured:    {name}, 1 case", out)
         self.assertNotIn("Untested", out)
 
     def test_cure_names_each_kind_that_is_not_tested_in_the_game(self) -> None:
+        # No kind is in the set today. This keeps the line working for the next kind that cure learns.
         self.save.write_bytes(afflictions_save(hypothermia=True, burns=True, pain=1, ankles=1, wrists=1))
-        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        waiting = frozenset({"hypothermia", "sprain-pain", "sprained-ankle"})
+        with mock.patch.object(edit, "CURE_NOT_TESTED_IN_GAME", waiting):
+            code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
         self.assertEqual(code, 0, err)
         self.assertIn("Untested: no save in which cure ended hypothermia, sprain-pain or sprained-ankle has "
                       "been loaded in the game yet. Try it on a save you can afford to lose", out.splitlines())
 
     def test_cure_names_one_kind_that_is_not_tested_in_the_game(self) -> None:
         self.save.write_bytes(afflictions_save(ankles=2, wrists=1))
-        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        with mock.patch.object(edit, "CURE_NOT_TESTED_IN_GAME", frozenset({"sprained-ankle"})):
+            code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
         self.assertEqual(code, 0, err)
         self.assertIn("Untested: no save in which cure ended sprained-ankle has been loaded in the game yet. "
                       "Try it on a save you can afford to lose", out.splitlines())
