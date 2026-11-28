@@ -3,7 +3,8 @@
 Python tools for The Long Dark survival saves (game v2.44 and later). One tool here changes
 a save file, `tld_save_apply.py`, and only after a checked backup. The readers only read,
 and the editor writes its result to a new file. Python 3.9 or newer. Standard library only,
-except the wiki helper, which needs the `requests` package.
+with two exceptions: the wiki helper needs the `requests` package, and the reader of the
+game's own files needs `UnityPy`.
 
 | File | What it does |
 |---|---|
@@ -15,6 +16,8 @@ except the wiki helper, which needs the `requests` package.
 | `tld_wiki_updater.py` | Lists items on the game's wiki that the item table does not cover. Needs internet access and the `requests` package |
 | `test_tld_wiki_updater.py` | Tests for `tld_wiki_updater.py`. They need the `requests` package and never reach the wiki |
 | `missing_prefabs.json` | The wiki helper's last report, written by its `--patch` option |
+| `tld_game_names.py` | Reads the item names from an installed game and compares them with the item table. Needs the `UnityPy` package |
+| `test_tld_game_names.py` | Tests for `tld_game_names.py`. They need neither the game nor `UnityPy`: a stand-in plays the package |
 | `tld_save_codec.py` | Decodes a save and encodes it again, exactly. Its `verify` command checks that a save rebuilds byte for byte |
 | `test_tld_save_codec.py` | Tests for `tld_save_codec.py` |
 | `tld_save_edit.py` | Changes a save and writes the result to a new file. One value of one inventory item: its count, its condition, the liquid it holds, the calories left in it, or the rounds loaded in it. Or the condition of every inventory item at once. Or one item taken out of the inventory, or another one of an item added to it. Or the player's own values: condition, calories, and the bars for thirst, fatigue and cold. Or the points of one skill. Or an end to hypothermia, sprains and burns. Or the place where the character stands |
@@ -1057,6 +1060,43 @@ The wiki ranks last as a source of item names, after the game's catalogs, real s
 `ItemDictionary.cs`. Wiki pages use display names, so check a new name against a real save
 before adding it to the helper's name table.
 
+### Read the names from the game
+
+`tld_game_names.py` reads the name of every item from the game's own files and compares
+them with `GAME_NAMES`, the name table in `tld_taxonomy.py`. Run it after a game update. It
+only reads the game folder. It needs the `UnityPy` package, which reads Unity's asset
+files (`python -m pip install UnityPy`). No other tool here needs that package.
+
+```powershell
+$game = "C:\Program Files (x86)\Steam\steamapps\common\TheLongDark"   # your game folder
+python tld_game_names.py check --game-dir $game
+python tld_game_names.py export "$env:TEMP\tld-names.json" --game-dir $game
+```
+
+The game folder is the one that holds `tld.exe`. Without `--game-dir` it comes from the
+environment variable `TLD_GAME_DIR`.
+
+`check` ends with 0 when the game's names are the ones in `GAME_NAMES`, and with 1 when a
+name is new, different or gone. It lists each of those. For game v2.60 it opens 17 of the
+game's bundle files and prints:
+
+```text
+Game version: 2.60 189457 S. Parts read: base, DLC01, DLC02.
+Prefabs with an item record: 706. With an English name: 695.
+All 695 names are the ones in GAME_NAMES in tld_taxonomy.py.
+```
+
+It does not change `tld_taxonomy.py`. When names differ, put them into `GAME_NAMES` by hand
+and set `GAME_NAMES_VERSION`, in the same file, to the version of the game they come from.
+
+`export` writes what it read to a JSON file: for every prefab the name, the key of the
+name, the item record, the condition group and the weight in billionths of a kilogram.
+Then come the game's table of condition steps, which holds the words `Fresh`, `Mint` and
+`Perfect` and the condition each one starts at, and the items that got no name. It refuses
+to write into the game folder.
+
+How the game stores a name, in four steps, is at the top of `tld_game_names.py`.
+
 ## Where the item table comes from
 
 Checked on 2026-11-16 against game v2.60 (changelist 189457):
@@ -1098,11 +1138,21 @@ The tests for the wiki helper need the `requests` package, as the helper does. W
 they are skipped, and the run still ends with `OK`. They never reach the wiki: a stand-in
 answers in its place, and the report goes to a temporary folder.
 
+The tests for `tld_game_names.py` need neither the game nor `UnityPy`. They build a small
+game folder with a catalog in the game's format, and a stand-in plays the package. Six more
+tests read a real game folder. They run when `TLD_GAME_DIR` names that folder and `UnityPy`
+is installed, and they only read:
+
+```powershell
+$env:TLD_GAME_DIR = "C:\Program Files (x86)\Steam\steamapps\common\TheLongDark"
+python -m unittest -v test_tld_game_names
+```
+
 GitHub runs the same tests on every pull request and on every push to `master`, on
 Windows and Linux with Python 3.9 through 3.14. The workflow is
 `.github/workflows/tests.yml` at the top of the repository. It installs `requests` for
 the wiki helper's tests. It has no real saves, so the checks that need `TLD_SAVE_DIR` are
-skipped there.
+skipped there, and no game, so the six tests that need `TLD_GAME_DIR` are skipped too.
 
 ## Known gaps
 
@@ -1129,8 +1179,14 @@ skipped there.
 - Eight names hold a character outside plain ASCII: a typographic apostrophe, as in the
   Spelunker's Lantern, or the u with two dots in the name Rudiger. The CSV holds the
   character. A console that cannot show it prints an escape such as `\u2019` in its place.
-- Reading the names again after a game update takes the game folder and a reader for the
-  game's packed files. That reader is not part of this repository.
+- After a game update, `tld_game_names.py check` lists the names that changed. Putting them
+  into `GAME_NAMES` is done by hand. The tool is written against game v2.60 and UnityPy
+  1.25.4, and it was checked on a copy of the game's files, not yet on Windows against an
+  installed game.
+- The key of a name is matched without regard to upper and lower case. That rests on three
+  film boxes, whose records write the key in another case than the game's text table does,
+  and on the game's wiki, which calls them by the table's text. It has not been checked on
+  the screen.
 - Saves from before 2018 use a different format and are not supported.
 - No save checked so far contains text outside plain ASCII. If the game writes such text
   in a form `tld_save_codec.py` does not reproduce, `verify` reports `FAILED` for that save.
