@@ -11,18 +11,20 @@ change finishes or advances an item, update this file in the same pull request.
 | Block | What it adds | State |
 |---|---|---|
 | F | Foundations: the tests run on GitHub, the wiki helper has tests, the folder has one decompressor, and coding agents have a context file | Done (pull requests 1 to 4) |
-| R | Reader depth: more of what a save holds, read correctly | Built (pull requests 5, 6 and 8). Open: the owner compares a few weights, liters and calories with the game's inventory screen |
+| R | Reader depth: more of what a save holds, read correctly | Built (pull requests 5, 6, 8, 33, 35 and 37). Open: carried weight as the game shows it, which the owner asked for on 2026-11-27, and the word for the condition that the game puts in front of a name |
 | I | Inventory edits: add an item, remove an item, repair everything, liters, calories, rounds | Built (pull requests 9 to 15) and tested in game on 2026-11-27, except for adding an item the inventory does not hold and film in the camera, which are not built |
-| P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | Built (pull requests 16 to 20) and tested in game on 2026-11-27. `cure` covers five kinds of affliction. Two of them are tested in game, a burn and a sprained wrist. Other afflictions wait for a save that holds one |
-| Trader | The Trader: read his state (trust, contacts, offers, special requests), a report command, and one edit (trust) | Not started. The owner has not yet confirmed the place in the order or the edit |
+| P | Player edits: condition, calories, thirst, fatigue, cold, position, cure afflictions, skills | Built (pull requests 16 to 20) and tested in game on 2026-11-27, `cure` for all five kinds of affliction it knows (pull request 34). The owner closed the block as built on 2026-11-27. More kinds of affliction come later, by his decision |
+| Trader | The Trader: read his state (trust, contacts, offers, special requests), a report command, and one edit (trust) | Not started. Parked by the owner on 2026-11-27 until he knows the Trader better. The place in the order and the edit are not decided |
 | T | Live tracker: where animals, corpses, Tale objects and one-of-a-kind items are as of the last game save, then a watcher that follows new saves | Not started |
 | U | Front end: a standalone desktop client that follows the design of the C# editor | Not started |
+| Feats | Feats and profile edits | Not started. The owner decided on 2026-11-27 that they are in, near the end of the order |
 
 ## Block R in detail
 
 | Item | State |
 |---|---|
 | Weight, liters and calories for every item | Done (pull request 5). Since pull request 37 the CSV also gives pounds and US gallons, and `liquids` gives US gallons, cut off after two decimals as the game shows them |
+| Carried weight as the game shows it | Decided by the owner on 2026-11-27: next after the US units. The game's own data gives three rules: the weight stored for a stack is for one pack (12 matches, 6 pills, 1 stick), liquid adds its liters times a density for each kind of liquid (water 1.0, kerosene 0.8 kg per liter), and worn clothing counts 75%. Not started: the rules wait for weights the owner reads in the game |
 | The game's display name where a source states it | Done for 1,014 of 1,040 prefabs. Pull request 6 took 617 names from the C# editor, the mod packs and the wiki. Pull request 33 added the game's own text for 695 prefabs, which now ranks first. Pull request 35 added `tld_game_names.py`, which reads the names from a game folder and says which ones differ from the table, for use after a game update. Open: the word for the condition that the game puts in front of a name |
 | A region for every record outside the inventory | Done (pull request 8). In 14 real saves no such record has a blank region now |
 
@@ -36,7 +38,7 @@ change finishes or advances an item, update this file in the same pull request.
 | Film in the camera | Decided by the owner on 2026-11-24: treat the camera like a gun, with three numbers: shots left, shots taken, and where the images are. The save keeps them in the camera's own list of rounds, in two photo counters, and in a photo list. All of these were empty in the 14 saves at hand. Since the owner's session of 2026-11-27 one save holds film in the camera and three photos, and the images are in a file of their own next to the save (`photo1`). Not started |
 | Repair everything in the inventory | Built (pull request 12). Tested in game on 2026-11-27. Torches and flares that have burned are left alone, and since pull request 36 `set-condition` refuses them too |
 | Remove an item | Built (pull request 13). Tested in game on 2026-11-27 |
-| Add an item | First step built (pull request 14): `copy-item` adds another one of an item the inventory holds. Tested in game on 2026-11-27: the game showed both, and one could be dropped while the other stayed. An item the inventory does not hold is not started: it needs a record built for each kind of item |
+| Add an item | First step built (pull request 14): `copy-item` adds another one of an item the inventory holds. Tested in game on 2026-11-27: the game showed both, and one could be dropped while the other stayed. An item the inventory does not hold is not started. The owner decided on 2026-11-27 that any item can be added by name. Open with him: whether its record is copied from another save that holds the item, or comes from records shipped with the tool |
 | Several edits put in place at once | Built (pull request 15): `apply` lists the inventory entries that an edited file adds or takes away, and every other value under its entry number in the live save. Before that, a file with an entry more or less was shown as one changed value, or as hundreds |
 
 ## Block P in detail
@@ -89,6 +91,5 @@ Far out. Nothing here is scheduled.
 
 ## Not planned
 
-- Feats and profile edits. The owner looks at this again after block P.
 - The three cheat switches of the C# editor.
 - Story-mode saves, and saves from before 2018.
