@@ -78,11 +78,13 @@ layer and encodes it back to the same bytes. Use it. Do not write new decoding c
 - `tld_taxonomy.py` is the one item table. For a prefab name, trust the game's catalogs
   first, then real saves, then `Helpers/ItemDictionary.cs`, and the wiki last. For the name
   the game shows, trust the game's own text first: `GAME_NAMES` in that file.
+  `tld_game_names.py check` compares that table with an installed game.
 
 ## Rules for code
 
-- Python 3.9 or newer, standard library only. The one exception is `requests`, which
-  `tld_wiki_updater.py` and its tests use.
+- Python 3.9 or newer, standard library only. Two tools need a package: `tld_wiki_updater.py`
+  and its tests use `requests`, and `tld_game_names.py` uses `UnityPy` to read the game's own
+  files. Nothing that reads or changes a save needs either one.
 - Type hints on everything new. `pathlib` for paths and `argparse` for command lines.
 - Handle errors explicitly, with a message that a player can act on.
 - No TODOs, stubs or placeholders.

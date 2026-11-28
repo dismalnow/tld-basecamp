@@ -1708,9 +1708,11 @@ LEGACY_PREFABS: frozenset[str] = frozenset({
 #                 gear prefab carries a GearItem component that names a GearItemData asset,
 #                 and that asset holds the key of the item's name. The key is looked up in
 #                 the English string table of the game, without regard to upper and lower
-#                 case, as the game does it. Runs of spaces are made one space and the ends
-#                 trimmed. Base game, DLC01 and DLC02. A prefab is left out when it has no
-#                 such asset, or when its key has no English text.
+#                 case: three film boxes write their key in another case than the table
+#                 does. Runs of spaces are made one space and the ends trimmed. Base game,
+#                 DLC01 and DLC02. A prefab is left out when it has no such asset, or when
+#                 its key has no English text. tld_game_names.py reads these names from a
+#                 game folder and compares them with this table.
 #   EDITOR_NAMES  Properties/Resources.resx of the C# editor in this repository. Its
 #                 item list stops at game v2.27. Stray spaces in two names were removed.
 #   MOD_NAMES     the mod packs themselves: an item's DisplayNameLocalizationId, looked up
@@ -1726,6 +1728,9 @@ LEGACY_PREFABS: frozenset[str] = frozenset({
 # GAME_NAMES holds the game's text as it is, so eight names have a character outside ASCII:
 # the apostrophe \u2019 and the letter \xfc. They are written as escapes to keep this file
 # plain ASCII.
+
+# The game version GAME_NAMES was read from: how tld_Data/StreamingAssets/version.txt begins.
+GAME_NAMES_VERSION = "2.60 189457"
 
 GAME_NAMES: dict[str, str] = {
     'GEAR_Accelerant': 'Accelerant',
