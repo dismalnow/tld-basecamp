@@ -117,12 +117,12 @@ except `repair-all`, which works on all of them.
 |---|---|---|
 | `set-count` | The count of a stack | Yes, on game v2.60 |
 | `set-condition` | The condition of an item, or of a whole stack | Yes, on game v2.60 |
-| `set-liters` | The liquid an item holds | Not yet. Its own output says so |
-| `set-calories` | The calories left in a food item | Not yet. Its own output says so |
-| `set-rounds` | The rounds loaded in a rifle, a revolver or a distress pistol | Not yet. Its own output says so |
-| `repair-all` | The condition of every item below 100% | Not yet. Its own output says so |
-| `remove-item` | One item, or one whole stack, leaves the inventory | Not yet. Its own output says so |
-| `copy-item` | Another one of an item the inventory holds is added | Not yet. Its own output says so |
+| `set-liters` | The liquid an item holds | Yes, on game v2.60 |
+| `set-calories` | The calories left in a food item | Yes, on game v2.60 |
+| `set-rounds` | The rounds loaded in a rifle, a revolver or a distress pistol | Yes, on game v2.60 |
+| `repair-all` | The condition of every item below 100% | Yes, on game v2.60 |
+| `remove-item` | One item, or one whole stack, leaves the inventory | Yes, on game v2.60 |
+| `copy-item` | Another one of an item the inventory holds is added | Yes, on game v2.60 |
 
 ### Count
 
@@ -173,8 +173,9 @@ A ruined item (condition 0) is refused: the game keeps more than the condition f
 
 ### Liters
 
-Not tested in the game yet: nobody has loaded a save changed by `set-liters`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: the water the character carries went from 2 to
+2.5 liters. The game kept the number, the character drank from it, and the game wrote back
+what was left.
 
 ```powershell
 python tld_save_edit.py liquids $save
@@ -199,7 +200,6 @@ Item:     GEAR_WaterSupplyPotable, inventory entry 1
 Change:   liters 2 -> 2.5 (stored as 2000000000 -> 2500000000)
 Checked:  the edited save differs from the original in exactly this one value
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by set-liters has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,789 bytes
 SHA-256:  7d13c4ced67c16f50fe5169e170cd7b7b4c7226058954afacabd8c5f9bb433f5
 sandbox15 itself was not changed.
@@ -221,8 +221,8 @@ places is refused as well, however many digits it has. Zeros at the end do not c
 
 ### Calories
 
-Not tested in the game yet: nobody has loaded a save changed by `set-calories`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: a Beef Jerky went from 350 to 175 calories, and
+the game showed 175.
 
 ```powershell
 python tld_save_edit.py foods $save
@@ -249,7 +249,6 @@ Item:     GEAR_Crackers, inventory entry 11
 Change:   calories 600.0 -> 300.0
 Checked:  the edited save differs from the original in exactly this one value
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by set-calories has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,804 bytes
 SHA-256:  061fd11e19bbe0dffe2d834e020b403016678242b9af8b4def0b0ec16a41e32f
 sandbox15 itself was not changed.
@@ -275,8 +274,8 @@ Things to know about calories:
 
 ### Rounds
 
-Not tested in the game yet: nobody has loaded a save changed by `set-rounds`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: Vaughn's Rifle went from 0 to 10 rounds. The
+game showed 10 in the rifle, and the loose rounds in the inventory were as before.
 
 ```powershell
 $other = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox7"
@@ -302,7 +301,6 @@ Item:     GEAR_Revolver, inventory entry 67
 Change:   rounds 2 -> 6 (GEAR_Revolver holds 6)
 Checked:  the edited save differs from the original in exactly this one value
 Checked:  12 of 13 entries are byte for byte unchanged (all except global)
-Untested: no save changed by set-rounds has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox7.edited, 623,134 bytes
 SHA-256:  2f822887de557676f2dfbd34951628b8d058ebf03442498f9614b7b268cced2c
 sandbox7 itself was not changed.
@@ -331,8 +329,10 @@ Things to know about rounds:
 
 ### Repair everything
 
-Not tested in the game yet: nobody has loaded a save changed by `repair-all`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: 107 items went to 100%. The game showed 100% for
+the three that were looked at, and in the save the game wrote none of the 107 is back at its
+old value. Two stacks of painkillers that had differed in condition became one stack in the
+game.
 
 ```powershell
 python tld_save_edit.py repair-all $save --out "$env:TEMP\sandbox15.edited"
@@ -348,7 +348,6 @@ Change:   condition set to 100% for 107 of the 443 items in the inventory
 Left:     336 at 100% already, 0 ruined, 0 burned torches or flares, 0 with a condition this tool does not change
 Checked:  the edited save differs from the original in exactly these 107 values
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by repair-all has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 584,124 bytes
 SHA-256:  e7671ec9ee53d914580856407e46484b5bbd29024503861a85021e962d2ab39e
 sandbox15 itself was not changed.
@@ -365,7 +364,7 @@ Things to know about `repair-all`:
   its condition, and in both burned torches in the real saves the condition is exactly what
   is left of 90 minutes: a torch that burned 53.6 minutes is at 40.5%. What the game makes of
   a full condition next to that burn time is not known. `set-condition` still changes such a
-  torch when you name it, and that is not tested in the game either. The C# editor's repair
+  torch when you name it, and that is not tested in the game. The C# editor's repair
   sets every item to 100% and marks torches and flares as fresh.
 - Hit points are left alone, as with `set-condition`. The game works them out again from the
   condition when it loads the save.
@@ -374,8 +373,8 @@ Things to know about `repair-all`:
 
 ### Remove an item
 
-Not tested in the game yet: nobody has loaded a save changed by `remove-item`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: a Birch Bark Tea was removed. The game did not
+show it, and the save the game wrote does not hold it.
 
 ```powershell
 python tld_save_edit.py items $save
@@ -393,7 +392,6 @@ Change:   removed (condition 95.8%). 442 entries are left in the inventory
 Note:     every entry number above 11 is now one lower. Run items again before the next edit
 Checked:  the edited inventory is the original one without this entry, and nothing else differs
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by remove-item has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,617 bytes
 SHA-256:  b4d6df6e56608838cf623e0b9b4c88476ae56ccd9f9db635b01093144c90a893
 sandbox15 itself was not changed.
@@ -424,8 +422,8 @@ Things to know about `remove-item`:
 
 ### Copy an item
 
-Not tested in the game yet: nobody has loaded a save changed by `copy-item`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: a Firearm Cleaning Kit was copied. The game
+showed two. One was dropped, and the other stayed in the inventory.
 
 ```powershell
 python tld_save_edit.py items $save
@@ -445,7 +443,6 @@ Change:   copied to a new entry at the end of the inventory, entry 443
 Number:   the copy has the instance number -423202. The original keeps -281632
 Checked:  the edited inventory is the original one plus this copy, and nothing else differs
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by copy-item has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 586,017 bytes
 SHA-256:  73c5ad0309327896dd3a002004e0ed7e3020338a91b27a6616d92c6f9fb09133
 sandbox15 itself was not changed.
@@ -529,8 +526,10 @@ Both of those saves, as the game wrote them, pass `verify`.
 bars for thirst, fatigue and cold. As with the inventory, the save you name is only read,
 the result goes to a new file, and the three checks above stand in between.
 
-Not tested in the game yet: nobody has loaded a save changed by `set-player`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: condition 100, calories 2500, hydration 100,
+rest 100 and warmth 60 were set in one save, in which the game had left the cold out. The
+game showed the first four as set. The cold bar was no longer full. The character stood by a
+fire, so the bar was read some way above 60.
 
 ```powershell
 $save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox6"
@@ -569,7 +568,6 @@ Change:   hydration 90.3% of the bar -> 100.0% of the bar (stored as m_CurrentTh
 Change:   rest 38.4% of the bar -> 100.0% of the bar (stored as m_CurrentFatigueProxy 61.640625 -> 0.0)
 Checked:  the edited save differs from the original in exactly these 4 values
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by set-player has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox6.edited, 291,695 bytes
 SHA-256:  ac45e1d7e442b55bd1815bb3da4e9a17bebb0d944f63b95e2d110ca6ebfdfd95
 sandbox6 itself was not changed.
@@ -617,8 +615,9 @@ Things to know about the player's values:
 `tld_save_edit.py` also changes the points of one of the nine skills. The save you name is
 only read, the result goes to a new file, and the three checks above stand in between.
 
-Not tested in the game yet: nobody has loaded a save changed by `set-skill`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: Cooking went from 3 to 350 points, and the game
+showed level 5. Archery went to 40 points in a save in which the game had left the points
+out, and the game showed the start of level 3.
 
 ```powershell
 $save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox6"
@@ -664,7 +663,6 @@ Skill:    cooking (m_Skill_CookingSerialized)
 Change:   points 3 -> 150
 Checked:  the edited save differs from the original in exactly this one value
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by set-skill has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox6.edited, 291,736 bytes
 SHA-256:  a96e22d22df1b3afac5f950e43030f33c9ce4934d2c3ac1a74250e31078acc81
 sandbox6 itself was not changed.
@@ -676,7 +674,9 @@ Things to know about skills:
   many points a level takes is fixed by the game, and the save does not hold it. The game's
   wiki, on its page about the Skilled Survivor achievement, names totals for level 5: 350
   for Cooking and for Mending, 250 for Ice Fishing, 200 for Fire Starting and 125 for
-  Archery. This tool has not checked those figures against the game.
+  Archery. On 2026-11-27 the game showed 350 points of Cooking as level 5, as the wiki says, and
+  40 points of Archery as the start of level 3. The other figures are not checked against
+  the game.
 - The game leaves the points out of a save when they are 0, and `skills` then says `is left
   out, which means 0`. In the 14 real saves that is so for 74 of the 126 skill records.
   `set-skill` puts the points in as the first field of the record. That is where the game
@@ -706,8 +706,10 @@ sprained ankles, sprained wrists and burns. `cure` ends every case of those five
 save holds. The save you name is only read, the result goes to a new file, and the three
 checks above stand in between.
 
-Not tested in the game yet: nobody has loaded a save changed by `cure`. Try it on a save
-you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60, for two of the five kinds: a burn and a sprained
+wrist were ended in one save. The first aid screen showed neither, and the save the game
+wrote holds no case. Hypothermia, sprain pain and sprained ankles are not tested in the game
+yet. `cure` says so when it ends one of those: try that on a save you can afford to lose.
 
 ```powershell
 $save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox10"
@@ -736,7 +738,7 @@ Cured:    sprain-pain, 1 case (m_SprainPainSerialized: 3 lists emptied)
 Cured:    sprained-wrist, 2 cases (m_SprainedWristSerialized: 5 lists emptied)
 Checked:  the edited save differs from the original in exactly these 8 values
 Checked:  6 of 7 entries are byte for byte unchanged (all except global)
-Untested: no save changed by cure has been loaded in the game yet. Try it on a save you can afford to lose
+Untested: no save in which cure ended sprain-pain has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox10.edited, 703,596 bytes
 SHA-256:  a7b82252f4ad9c63858899a31f866df393dedc81fc5d7f01ad9447d8e8dd7560
 sandbox10 itself was not changed.
@@ -775,8 +777,9 @@ Things to know about curing:
 name is only read, the result goes to a new file, and the three checks above stand in
 between.
 
-Not tested in the game yet: nobody has loaded a save changed by `set-position`. Try it on a
-save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60: the character was moved about 4.5 meters inside
+a house, to the spot where the character of another save stands, just inside the front door.
+The game loaded the character at the front door.
 
 ```powershell
 $save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox15"
@@ -802,7 +805,6 @@ Change:   y -0.5301075 -> 0.0165060163
 Change:   z -1.0880059 -> -1.38356638
 Checked:  the edited save differs from the original in exactly these 3 values
 Checked:  7 of 8 entries are byte for byte unchanged (all except global)
-Untested: no save changed by set-position has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox15.edited, 585,824 bytes
 SHA-256:  627128049ec34383720290dc88df46e7ebebca5d15482e79e83b7f85c696719d
 sandbox15 itself was not changed.

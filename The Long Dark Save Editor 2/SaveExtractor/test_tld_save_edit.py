@@ -3807,13 +3807,13 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(after[:2], before[:2], "the original save changed")
         self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
 
-    def test_set_liters_says_that_it_is_not_tested_in_the_game(self) -> None:
+    def test_set_liters_no_longer_says_that_it_is_not_tested_in_the_game(self) -> None:
         self.save.write_bytes(liquids_save())
         code, out, _ = self.run_command("set-liters", str(self.save), "--item", "GEAR_BottleHydrogenPeroxide",
                                         "--liters", "0.5", "--out", str(self.out))
         self.assertEqual(code, 0)
         self.assertIn("liters not set -> 0.5 (stored as -214748364800000 -> 500000000)", out)
-        self.assertIn("Untested: no save changed by set-liters has been loaded in the game yet", out)
+        self.assertNotIn("Untested", out)
 
     def test_whole_liters_are_printed_plainly(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -3827,10 +3827,9 @@ class CommandTests(unittest.TestCase):
                                         "--count", "40", "--out", str(self.out))
         self.assertEqual(code, 0)
         self.assertNotIn("Untested", out)
-        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset({"set-liters", "set-calories", "set-rounds",
-                                                             "repair-all", "remove-item", "copy-item",
-                                                             "set-player", "set-skill", "cure",
-                                                             "set-position"}))
+        self.assertEqual(edit.NOT_TESTED_IN_GAME, frozenset())
+        self.assertEqual(edit.CURE_NOT_TESTED_IN_GAME,
+                         frozenset({"hypothermia", "sprain-pain", "sprained-ankle"}))
 
     def test_set_liters_refusals_write_nothing(self) -> None:
         self.save.write_bytes(liquids_save())
@@ -3901,7 +3900,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Change:   calories 689.2364 -> 500.0\n", out)
         self.assertIn("differs from the original in exactly this one value", out)
         self.assertIn("2 of 3 entries are byte for byte unchanged", out)
-        self.assertIn("Untested: no save changed by set-calories has been loaded in the game yet", out)
+        self.assertNotIn("Untested", out)
         self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
@@ -4011,7 +4010,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Change:   rounds 2 -> 6 (GEAR_Revolver holds 6)\n", out)
         self.assertIn("differs from the original in exactly this one value", out)
         self.assertIn("2 of 3 entries are byte for byte unchanged", out)
-        self.assertIn("Untested: no save changed by set-rounds has been loaded in the game yet", out)
+        self.assertNotIn("Untested", out)
         self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
@@ -4072,7 +4071,7 @@ class CommandTests(unittest.TestCase):
                       "this tool does not change\n", out)
         self.assertIn("Checked:  the edited save differs from the original in exactly these 7 values\n", out)
         self.assertIn("2 of 3 entries are byte for byte unchanged", out)
-        self.assertIn("Untested: no save changed by repair-all has been loaded in the game yet", out)
+        self.assertNotIn("Untested", out)
         self.assertNotIn("Item:", out)
         self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
         after = self.snapshot()
@@ -4149,7 +4148,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Checked:  the edited inventory is the original one without this entry, and nothing else "
                       "differs\n", out)
         self.assertIn("2 of 3 entries are byte for byte unchanged", out)
-        self.assertIn("Untested: no save changed by remove-item has been loaded in the game yet", out)
+        self.assertNotIn("Untested", out)
         self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
@@ -4228,7 +4227,7 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Checked:  the edited inventory is the original one plus this copy, and nothing else "
                       "differs\n", out)
         self.assertIn("2 of 3 entries are byte for byte unchanged", out)
-        self.assertIn("Untested: no save changed by copy-item has been loaded in the game yet", out)
+        self.assertNotIn("Untested", out)
         self.assertIn(hashlib.sha256(self.out.read_bytes()).hexdigest(), out)
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
@@ -4342,11 +4341,9 @@ class CommandTests(unittest.TestCase):
             "Checked:  the edited save differs from the original in exactly these 3 values",
             "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
         ])
-        self.assertEqual(lines[6], "Untested: no save changed by set-player has been loaded in the game yet. "
-                                   "Try it on a save you can afford to lose")
-        self.assertEqual(lines[7], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
-        self.assertEqual(lines[8], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
-        self.assertEqual(lines[9:], ["sandbox15 itself was not changed."])
+        self.assertEqual(lines[6], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[7], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[8:], ["sandbox15 itself was not changed."])
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
         self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
@@ -4499,11 +4496,9 @@ class CommandTests(unittest.TestCase):
             "Checked:  the edited save differs from the original in exactly this one value",
             "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
         ])
-        self.assertEqual(lines[5], "Untested: no save changed by set-skill has been loaded in the game yet. "
-                                   "Try it on a save you can afford to lose")
-        self.assertEqual(lines[6], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
-        self.assertEqual(lines[7], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
-        self.assertEqual(lines[8:], ["sandbox15 itself was not changed."])
+        self.assertEqual(lines[5], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[6], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[7:], ["sandbox15 itself was not changed."])
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
         self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))
@@ -4635,8 +4630,8 @@ class CommandTests(unittest.TestCase):
             "Checked:  the edited save differs from the original in exactly these 9 values",
             "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
         ])
-        self.assertEqual(lines[6], "Untested: no save changed by cure has been loaded in the game yet. Try it "
-                                   "on a save you can afford to lose")
+        self.assertEqual(lines[6], "Untested: no save in which cure ended hypothermia or sprain-pain has been "
+                                   "loaded in the game yet. Try it on a save you can afford to lose")
         self.assertEqual(lines[7], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
         self.assertEqual(lines[8], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
         self.assertEqual(lines[9:], ["sandbox15 itself was not changed."])
@@ -4653,6 +4648,28 @@ class CommandTests(unittest.TestCase):
             "Cured:    burns, 1 case (m_BurnsSerialized: m_Active true -> false)",
             "Checked:  the edited save differs from the original in exactly this one value",
         ])
+
+    def test_cure_of_kinds_seen_in_the_game_does_not_say_untested(self) -> None:
+        self.save.write_bytes(afflictions_save(burns=True, wrists=1))
+        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertIn("Cured:    sprained-wrist, 1 case", out)
+        self.assertIn("Cured:    burns, 1 case", out)
+        self.assertNotIn("Untested", out)
+
+    def test_cure_names_each_kind_that_is_not_tested_in_the_game(self) -> None:
+        self.save.write_bytes(afflictions_save(hypothermia=True, burns=True, pain=1, ankles=1, wrists=1))
+        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertIn("Untested: no save in which cure ended hypothermia, sprain-pain or sprained-ankle has "
+                      "been loaded in the game yet. Try it on a save you can afford to lose", out.splitlines())
+
+    def test_cure_names_one_kind_that_is_not_tested_in_the_game(self) -> None:
+        self.save.write_bytes(afflictions_save(ankles=2, wrists=1))
+        code, out, err = self.run_command("cure", str(self.save), "--out", str(self.out))
+        self.assertEqual(code, 0, err)
+        self.assertIn("Untested: no save in which cure ended sprained-ankle has been loaded in the game yet. "
+                      "Try it on a save you can afford to lose", out.splitlines())
 
     def test_cure_of_one_kind_with_lists_counts_each_list(self) -> None:
         self.save.write_bytes(afflictions_save(wrists=1))
@@ -4764,11 +4781,9 @@ class CommandTests(unittest.TestCase):
             "Checked:  the edited save differs from the original in exactly these 3 values",
             "Checked:  2 of 3 entries are byte for byte unchanged (all except global)",
         ])
-        self.assertEqual(lines[7], "Untested: no save changed by set-position has been loaded in the game yet. "
-                                   "Try it on a save you can afford to lose")
-        self.assertEqual(lines[8], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
-        self.assertEqual(lines[9], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
-        self.assertEqual(lines[10:], ["sandbox15 itself was not changed."])
+        self.assertEqual(lines[7], f"Written:  {self.out}, {len(self.out.read_bytes()):,} bytes")
+        self.assertEqual(lines[8], f"SHA-256:  {hashlib.sha256(self.out.read_bytes()).hexdigest()}")
+        self.assertEqual(lines[9:], ["sandbox15 itself was not changed."])
         after = self.snapshot()
         self.assertEqual(after[:2], before[:2], "the original save changed")
         self.assertEqual(after[2], sorted(before[2] + ["sandbox15.edited"]))

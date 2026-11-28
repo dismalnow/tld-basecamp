@@ -57,9 +57,9 @@ moves the character inside that scene: give one or more of --x, --y and --z, whe
 height. The tool does not know the ground, so take the numbers from a spot that is known to
 be good. Write a number that has an exponent after an equals sign: --y=-1.19E-07.
 
-set-liters, set-calories, set-rounds, repair-all, remove-item, copy-item, set-player,
-set-skill, cure and set-position have not been tested in the game yet. Their own output
-says so.
+Every one of these edits has been loaded in the game. cure has ended a burn and a sprained
+wrist there. It has not yet ended hypothermia, sprain pain or a sprained ankle in a save that
+was then loaded in the game, and its own output says so when it ends one of those.
 
 The save you name is only read. The result goes to NEW_FILE, which must not exist yet and
 must not be named like a live save (sandbox1, challenge3, ...). Putting it in place of the
@@ -95,7 +95,7 @@ import sys
 from dataclasses import dataclass
 from decimal import Context, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
+from typing import Dict, FrozenSet, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 import tld_save_codec as codec
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
@@ -120,9 +120,12 @@ ROUNDS_HELD: Dict[str, int] = {
     "GEAR_FlareGun": 1,
 }
 
-# Kinds of edit that no one has loaded in the game yet. Their output says so.
-NOT_TESTED_IN_GAME = frozenset({"set-liters", "set-calories", "set-rounds", "repair-all", "remove-item",
-                                "copy-item", "set-player", "set-skill", "cure", "set-position"})
+# Kinds of edit that no one has loaded in the game yet. Their output says so. The ten kinds
+# that stood here were loaded in the game on 2026-11-27, so the set is empty.
+NOT_TESTED_IN_GAME: FrozenSet[str] = frozenset()
+# Afflictions that cure has not yet ended in a save that was then loaded in the game. Its
+# output says so when it ends one of them.
+CURE_NOT_TESTED_IN_GAME: FrozenSet[str] = frozenset({"hypothermia", "sprain-pain", "sprained-ankle"})
 
 Difference = Tuple[str, str, str]
 
@@ -2478,9 +2481,11 @@ def _run_cure(path: Path, out: Path) -> int:
     print(f"Checked:  the edited save differs from the original in exactly {values}")
     print(f"Checked:  {edit.unchanged_entries} of {edit.entries} entries are byte for byte unchanged "
           "(all except global)")
-    if "cure" in NOT_TESTED_IN_GAME:
-        print("Untested: no save changed by cure has been loaded in the game yet. Try it on a save you can "
-              "afford to lose")
+    untested = [name for name, _ in edit.cured if name in CURE_NOT_TESTED_IN_GAME]
+    if untested:
+        kinds = untested[0] if len(untested) == 1 else ", ".join(untested[:-1]) + " or " + untested[-1]
+        print(f"Untested: no save in which cure ended {kinds} has been loaded in the game yet. Try it on a "
+              "save you can afford to lose")
     print(f"Written:  {out}, {len(edit.data):,} bytes")
     print(f"SHA-256:  {hashlib.sha256(edit.data).hexdigest()}")
     print(f"{path.name} itself was not changed.")
@@ -2760,8 +2765,7 @@ option was wrong.
                                     "more than one of the item")
     set_condition.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                                help="the file to create. It must not exist yet")
-    set_liters = commands.add_parser("set-liters", help="change the liquid one inventory item holds "
-                                                        "(not tested in the game yet)")
+    set_liters = commands.add_parser("set-liters", help="change the liquid one inventory item holds")
     set_liters.add_argument("save", type=Path, metavar="SAVE",
                             help="the save file to read. It is not changed")
     set_liters.add_argument("--item", required=True, metavar="GEAR_NAME",
@@ -2773,8 +2777,7 @@ option was wrong.
                                  "more than one of the item")
     set_liters.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                             help="the file to create. It must not exist yet")
-    set_calories = commands.add_parser("set-calories", help="change the calories left in one inventory item "
-                                                            "(not tested in the game yet)")
+    set_calories = commands.add_parser("set-calories", help="change the calories left in one inventory item")
     set_calories.add_argument("save", type=Path, metavar="SAVE",
                               help="the save file to read. It is not changed")
     set_calories.add_argument("--item", required=True, metavar="GEAR_NAME",
@@ -2787,8 +2790,7 @@ option was wrong.
                                    "more than one of the item")
     set_calories.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                               help="the file to create. It must not exist yet")
-    set_rounds = commands.add_parser("set-rounds", help="change the rounds loaded in one inventory weapon "
-                                                        "(not tested in the game yet)")
+    set_rounds = commands.add_parser("set-rounds", help="change the rounds loaded in one inventory weapon")
     set_rounds.add_argument("save", type=Path, metavar="SAVE",
                             help="the save file to read. It is not changed")
     set_rounds.add_argument("--item", required=True, metavar="GEAR_NAME",
@@ -2800,14 +2802,12 @@ option was wrong.
                                  "more than one of the weapon")
     set_rounds.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                             help="the file to create. It must not exist yet")
-    repair_all = commands.add_parser("repair-all", help="set every inventory item below 100%% to 100%% "
-                                                        "(not tested in the game yet)")
+    repair_all = commands.add_parser("repair-all", help="set every inventory item below 100%% to 100%%")
     repair_all.add_argument("save", type=Path, metavar="SAVE",
                             help="the save file to read. It is not changed")
     repair_all.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                             help="the file to create. It must not exist yet")
-    remove = commands.add_parser("remove-item", help="take one item or one whole stack out of the inventory "
-                                                     "(not tested in the game yet)")
+    remove = commands.add_parser("remove-item", help="take one item or one whole stack out of the inventory")
     remove.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
     remove.add_argument("--item", required=True, metavar="GEAR_NAME",
                         help="the item, as items prints it, for example GEAR_Stone")
@@ -2816,8 +2816,7 @@ option was wrong.
                              "of the item")
     remove.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                         help="the file to create. It must not exist yet")
-    duplicate = commands.add_parser("copy-item", help="add another one of an item the inventory holds "
-                                                      "(not tested in the game yet)")
+    duplicate = commands.add_parser("copy-item", help="add another one of an item the inventory holds")
     duplicate.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
     duplicate.add_argument("--item", required=True, metavar="GEAR_NAME",
                            help="the item to copy, as items prints it, for example GEAR_MRE")
@@ -2827,7 +2826,7 @@ option was wrong.
     duplicate.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                            help="the file to create. It must not exist yet")
     set_player = commands.add_parser("set-player", help="change the player's condition, calories, hydration, "
-                                                        "rest or warmth (not tested in the game yet)")
+                                                        "rest or warmth")
     set_player.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
     for name, meaning, best in (("condition", "the player's condition in percent", ""),
                                 ("calories", "the calories the player has in store", ""),
@@ -2841,8 +2840,7 @@ option was wrong.
                                      + (f". {limits.high:g} is {best}" if best else ""))
     set_player.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                             help="the file to create. It must not exist yet")
-    set_skill = commands.add_parser("set-skill", help="change the points of one skill "
-                                                      "(not tested in the game yet)")
+    set_skill = commands.add_parser("set-skill", help="change the points of one skill")
     set_skill.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
     set_skill.add_argument("--skill", required=True, metavar="NAME",
                            help="the skill, as skills prints it: " + ", ".join(SKILLS))
@@ -2851,12 +2849,11 @@ option was wrong.
     set_skill.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                            help="the file to create. It must not exist yet")
     cure = commands.add_parser("cure", help="end hypothermia, sprain pain, sprained ankles and wrists, and "
-                                            "burns (not tested in the game yet)")
+                                            "burns")
     cure.add_argument("save", type=Path, metavar="SAVE", help="the save file to read. It is not changed")
     cure.add_argument("--out", required=True, type=Path, metavar="NEW_FILE",
                       help="the file to create. It must not exist yet")
-    set_position_ = commands.add_parser("set-position", help="move the character inside the scene it is in "
-                                                             "(not tested in the game yet)")
+    set_position_ = commands.add_parser("set-position", help="move the character inside the scene it is in")
     set_position_.add_argument("save", type=Path, metavar="SAVE",
                                help="the save file to read. It is not changed")
     for axis, meaning in zip(AXES, ("the new x", "the new y, which is the height", "the new z")):
