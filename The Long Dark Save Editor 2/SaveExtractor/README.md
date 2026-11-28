@@ -8,7 +8,7 @@ except the wiki helper, which needs the `requests` package.
 | File | What it does |
 |---|---|
 | `tld_save_reader.py` | Lists every item in a save, as a summary or a CSV |
-| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, how it decompresses, and the weight, liters and calories it reads |
+| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, how it decompresses, the weight, liters and calories it reads, and the item names it shows |
 | `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, where the prefab comes from, and the game's display name where a source states it |
 | `test_tld_taxonomy.py` | Tests for the display names in `tld_taxonomy.py` |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
@@ -53,7 +53,7 @@ is a spoiler, so it is off by default.
 | `location_type` | `player_inventory`, `floor`, `scripted` (placed by the game, not interactive yet), `container`, `container_unsearched` |
 | `container` | Container name, for items in containers |
 | `category`, `subcategory` | From `tld_taxonomy.py`. `Unknown` means the prefab is not in the table |
-| `item` | The name the game shows for the item, where the item table has it. Otherwise a name made from the prefab name: `Kerosene Lamp Spelunkers` for `GEAR_KeroseneLamp_Spelunkers` |
+| `item` | The name the game gives the item, where the item table has it: `Acorn Bannock` for `GEAR_CookedBannockAcorn`. Otherwise a name made from the prefab name: `Dried Mangos` for `GEAR_DriedMangos`. The word for the item's condition, which the game's inventory puts in front (`Gourmet Acorn Bannock`, `New Beef Jerky`), is left out |
 | `prefab` | The `GEAR_` prefab name, exactly as the save stores it. Two prefabs can share one display name, so this is the column that tells items apart |
 | `count`, `condition_pct` | Stack size and condition. Both are unknown for unsearched loot |
 | `x`, `y`, `z` | Position in the scene |
@@ -1114,9 +1114,22 @@ skipped there.
   stored weight of each item (`unit_weight_kg`), which leaves out liquid, the part of a food
   item already eaten, and wet clothing.
 - Powders (flour, salt, oats, gunpowder) store their amount as a weight. It is not read.
-- The game's display name is known for 617 of the 1,040 prefabs: the items the C# editor
-  names (game v2.27 and older), the mod items, and eleven items by way of the wiki. The
-  other 423, most of them from the two DLCs, show a name made from the prefab name.
+- The game's display name is known for 1,014 of the 1,040 prefabs. 695 names come from
+  the game's own files, read on 2026-11-27 from v2.60: the base game and both DLCs. 191 come
+  from the C# editor, for items that are in none of the game's three survival catalogs, and
+  128 from the mod packs. The other 26 show a name made from the prefab name: the game's
+  files give them no name asset, or a name key without English text.
+- A name is the game's own text, also where it looks wrong or says little. The game calls
+  every Polaroid `Polaroid`, and its files give the cattail plant the name of the Technical
+  Backpack. The `prefab` column tells such items apart.
+- The game's inventory puts a word for the condition in front of a name: `New Beef Jerky`,
+  `New Hoodie`, `Perfect Rifle Ammunition`, `Gourmet Acorn Bannock`. The owner read these four
+  in the game on 2026-11-27. The reader shows the name without that word.
+- Eight names hold a character outside plain ASCII: a typographic apostrophe, as in the
+  Spelunker's Lantern, or the u with two dots in the name Rudiger. The CSV holds the
+  character. A console that cannot show it prints an escape such as `\u2019` in its place.
+- Reading the names again after a game update takes the game folder and a reader for the
+  game's packed files. That reader is not part of this repository.
 - Saves from before 2018 use a different format and are not supported.
 - No save checked so far contains text outside plain ASCII. If the game writes such text
   in a form `tld_save_codec.py` does not reproduce, `verify` reports `FAILED` for that save.
