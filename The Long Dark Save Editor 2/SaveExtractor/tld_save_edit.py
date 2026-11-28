@@ -124,8 +124,10 @@ ROUNDS_HELD: Dict[str, int] = {
 # that stood here were loaded in the game on 2026-11-27, so the set is empty.
 NOT_TESTED_IN_GAME: FrozenSet[str] = frozenset()
 # Afflictions that cure has not yet ended in a save that was then loaded in the game. Its
-# output says so when it ends one of them.
-CURE_NOT_TESTED_IN_GAME: FrozenSet[str] = frozenset({"hypothermia", "sprain-pain", "sprained-ankle"})
+# output says so when it ends one of them. The five kinds that cure knows were all loaded in
+# the game on 2026-11-27, so this set is empty too. A kind that cure learns later goes in here
+# until the owner has seen it in the game.
+CURE_NOT_TESTED_IN_GAME: FrozenSet[str] = frozenset()
 
 Difference = Tuple[str, str, str]
 

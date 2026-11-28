@@ -706,10 +706,11 @@ sprained ankles, sprained wrists and burns. `cure` ends every case of those five
 save holds. The save you name is only read, the result goes to a new file, and the three
 checks above stand in between.
 
-Tested in the game on 2026-11-27, on v2.60, for two of the five kinds: a burn and a sprained
-wrist were ended in one save. The first aid screen showed neither, and the save the game
-wrote holds no case. Hypothermia, sprain pain and sprained ankles are not tested in the game
-yet. `cure` says so when it ends one of those: try that on a save you can afford to lose.
+Tested in the game on 2026-11-27, on v2.60, for all five kinds, in two saves. In the first a
+burn and a sprained wrist were ended, and the first aid screen showed neither. In the
+second, hypothermia, sprain pain and a sprained ankle were ended, which the game's console
+had given the character. The owner saw no hypothermia and no sprained ankle, and did not
+name the pain. The saves the game wrote afterward hold no case of any of the five.
 
 ```powershell
 $save = "$env:LOCALAPPDATA\Hinterland\TheLongDark\Survival\sandbox10"
@@ -738,7 +739,6 @@ Cured:    sprain-pain, 1 case (m_SprainPainSerialized: 3 lists emptied)
 Cured:    sprained-wrist, 2 cases (m_SprainedWristSerialized: 5 lists emptied)
 Checked:  the edited save differs from the original in exactly these 8 values
 Checked:  6 of 7 entries are byte for byte unchanged (all except global)
-Untested: no save in which cure ended sprain-pain has been loaded in the game yet. Try it on a save you can afford to lose
 Written:  C:\Users\you\AppData\Local\Temp\sandbox10.edited, 703,596 bytes
 SHA-256:  a7b82252f4ad9c63858899a31f866df393dedc81fc5d7f01ad9447d8e8dd7560
 sandbox10 itself was not changed.
@@ -756,11 +756,12 @@ Things to know about curing:
   the 14 real saves holds what is left of hypothermia and of a burn that are over, with
   every such field still in place and the switch gone.
 - The game leaves `m_Active` out of a record while it is off. `cure` writes `false`, as the
-  old C# editor does.
+  old C# editor does. When the game saved the two saves of 2026-11-27 again, it left the
+  field out, for the burn and for the hypothermia.
 - These five kinds are the ones that a real save has shown in use. Of the 14 real saves,
   two hold hypothermia, one holds a burn, two hold sprained wrists and two hold sprain
-  pain. A sprained ankle is stored exactly like a sprained wrist, and no real save holds
-  one.
+  pain. A sprained ankle is stored exactly like a sprained wrist. None of the 14 holds one.
+  A test save of 2026-11-27 does: the game's console gave it one, and the pain with it.
 - Other afflictions are neither read nor changed: frostbite, food poisoning, dysentery,
   infections, blood loss, broken ribs, cabin fever, parasites and the rest. `afflictions`
   does not list them, so a save that shows no case here can still hold one of those. A kind
