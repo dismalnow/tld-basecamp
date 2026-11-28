@@ -891,7 +891,21 @@ def _interactive_args():
 # CLI
 # ---------------------------------------------------------------------------
 
+def _keep_output_printable() -> None:
+    """Let a name print on a console whose code page lacks one of its characters.
+
+    Eight names in the item table hold an apostrophe or a letter outside ASCII, as the game
+    writes them. Printing one to such a console would end the run with a
+    UnicodeEncodeError. With this, the character is printed as an escape such as \\u2019.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(errors="backslashreplace")
+
+
 def main() -> None:
+    _keep_output_printable()
     parser = argparse.ArgumentParser(
         description="Extract items from a TLD v2.44+ save file. No dependencies required.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
