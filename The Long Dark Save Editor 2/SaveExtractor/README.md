@@ -62,10 +62,10 @@ is a spoiler, so it is off by default.
 | `count`, `condition_pct` | Stack size and condition. Both are unknown for unsearched loot |
 | `x`, `y`, `z` | Position in the scene |
 | `source` | `base`, `DLC01` (Tales from the Far Territory), `DLC02` (Iron Road), `mod:<pack>`, or `legacy` |
-| `unit_weight_kg` | Weight of one unit in kilograms, as the save stores it. For a stack, multiply by `count`. Blank when the save stores no weight: water, other liquids, powders, papers and keys |
+| `unit_weight_kg` | The weight the save stores for the item, in kilograms. For most items that is one unit. For a stack, the game's own data says it is one pack: 1 stick, but 12 matches or 6 pills. That reading is not compared with the game's screen yet. Blank when the save stores no weight: water, other liquids, powders, papers and keys |
 | `liters` | Liquid the item holds, in liters: the water you carry, a bottle or can, or the fuel in a lamp. Blank when the item holds none, or the game has not set the amount yet |
 | `calories` | Calories left in one unit of a food item |
-| `unit_weight_lb` | Weight of one unit in pounds. Blank when `unit_weight_kg` is blank |
+| `unit_weight_lb` | The same stored weight in pounds. Blank when `unit_weight_kg` is blank |
 | `gallons` | Liquid the item holds in US gallons. Blank when `liters` is blank |
 
 `unit_weight_kg` is the weight of a whole unit. The game keeps the same number for a food item
@@ -1188,8 +1188,10 @@ skipped there, and no game, so the six tests that need `TLD_GAME_DIR` are skippe
 - The names of the two mines that join regions come from the game's wiki, not from the
   game's own text.
 - The reader does not work out the weight the game shows for what you carry. It reports the
-  stored weight of each item (`unit_weight_kg`), which leaves out liquid, the part of a food
-  item already eaten, and wet clothing.
+  weight the save stores for each item (`unit_weight_kg`, `unit_weight_lb`). By the game's own
+  data, the weight on the screen also counts the liquid an item holds, a stack by its count,
+  and worn clothing at 75%. That is not built, and not compared with the game's screen yet.
+  Whether a food item that is partly eaten, or wet clothing, weighs differently is not known.
 - Powders (flour, salt, oats, gunpowder) store their amount as a weight. It is not read.
 - The game's display name is known for 1,014 of the 1,040 prefabs. 695 names come from
   the game's own files, read on 2026-11-27 from v2.60: the base game and both DLCs. 191 come
