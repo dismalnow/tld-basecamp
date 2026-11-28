@@ -615,9 +615,16 @@ class ItemNameTests(ReaderCase):
             ("GEAR_BasicBoots", "Trail Boots"), ("GEAR_KeroseneLampB", "Storm Lantern"),
             ("GEAR_AuroraEnergyDrink", "Aurora Energy Drink")])
 
+    def test_an_item_the_games_files_name_shows_that_name(self) -> None:
+        # None of these three had a name before the game's own files were read.
+        self.assertEqual(
+            self.names_for("GEAR_CookedBannockAcorn", "GEAR_Camera", "GEAR_KeroseneLamp_Spelunkers"), [
+                ("GEAR_CookedBannockAcorn", "Acorn Bannock"), ("GEAR_Camera", "Camera"),
+                ("GEAR_KeroseneLamp_Spelunkers", "Spelunker\u2019s Lantern")])
+
     def test_an_item_without_a_known_name_gets_one_from_its_prefab(self) -> None:
-        self.assertEqual(self.names_for("GEAR_KeroseneLamp_Spelunkers", "GEAR_NotInAnyTable"), [
-            ("GEAR_KeroseneLamp_Spelunkers", "Kerosene Lamp Spelunkers"),
+        self.assertEqual(self.names_for("GEAR_DriedMangos", "GEAR_NotInAnyTable"), [
+            ("GEAR_DriedMangos", "Dried Mangos"),
             ("GEAR_NotInAnyTable", "Not In Any Table")])
 
     def test_a_hand_placed_copy_shows_the_same_name(self) -> None:
@@ -630,6 +637,36 @@ class ItemNameTests(ReaderCase):
         rows = rows_of(self.reports / "sandbox15.csv")
         item, prefab = reader.HEADERS.index("item"), reader.HEADERS.index("prefab")
         self.assertEqual((rows[1][item], rows[1][prefab]), ("Trail Boots", "GEAR_BasicBoots"))
+
+    def test_the_csv_keeps_a_character_outside_ascii(self) -> None:
+        self.names_for("GEAR_Rudiger_Watch")
+        code, _, _ = self.run_reader(str(self.save), "--csv")
+        self.assertEqual(code, 0)
+        rows = rows_of(self.reports / "sandbox15.csv")
+        self.assertEqual(rows[1][reader.HEADERS.index("item")], "R\xfcdiger's Watch")
+
+    def summary_on_a_console(self, encoding: str) -> str:
+        """What the summary prints to a console that knows only this encoding."""
+        raw = io.BytesIO()
+        console = io.TextIOWrapper(raw, encoding=encoding, errors="strict")
+        with mock.patch("sys.argv", ["tld_save_reader.py", str(self.save), "--summary"]), \
+                contextlib.redirect_stdout(console), contextlib.redirect_stderr(io.StringIO()):
+            reader.main()
+            console.flush()
+        return raw.getvalue().decode(encoding)
+
+    def test_a_console_without_the_character_gets_an_escape(self) -> None:
+        # Before, the run ended here with a UnicodeEncodeError.
+        self.names_for("GEAR_KeroseneLamp_Spelunkers", "GEAR_Rudiger_Watch")
+        printed = self.summary_on_a_console("ascii")
+        self.assertIn("Spelunker\\u2019s Lantern", printed)
+        self.assertIn("R\\xfcdiger's Watch", printed)
+
+    def test_a_console_with_the_character_prints_it(self) -> None:
+        self.names_for("GEAR_KeroseneLamp_Spelunkers", "GEAR_Rudiger_Watch")
+        printed = self.summary_on_a_console("utf-8")
+        self.assertIn("Spelunker\u2019s Lantern", printed)
+        self.assertIn("R\xfcdiger's Watch", printed)
 
 
 def real_saves() -> Sequence[Path]:

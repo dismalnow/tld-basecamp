@@ -76,7 +76,8 @@ layer and encodes it back to the same bytes. Use it. Do not write new decoding c
   rebuilds byte for byte.
 - Field names such as `m_SearializedGear` are the game's own spelling. Do not correct them.
 - `tld_taxonomy.py` is the one item table. For a prefab name, trust the game's catalogs
-  first, then real saves, then `Helpers/ItemDictionary.cs`, and the wiki last.
+  first, then real saves, then `Helpers/ItemDictionary.cs`, and the wiki last. For the name
+  the game shows, trust the game's own text first: `GAME_NAMES` in that file.
 
 ## Rules for code
 

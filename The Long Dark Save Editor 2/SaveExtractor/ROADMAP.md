@@ -23,7 +23,7 @@ change finishes or advances an item, update this file in the same pull request.
 | Item | State |
 |---|---|
 | Weight, liters and calories for every item | Done (pull request 5) |
-| The game's display name where a source states it | Done for 617 of 1,040 prefabs (pull request 6). The other 423 need the game's own text table |
+| The game's display name where a source states it | Done for 1,014 of 1,040 prefabs. Pull request 6 took 617 names from the C# editor, the mod packs and the wiki. Pull request 33 added the game's own text for 695 prefabs, which now ranks first. Open: the word for the condition that the game puts in front of a name, and a way to read the names again after a game update |
 | A region for every record outside the inventory | Done (pull request 8). In 14 real saves no such record has a blank region now |
 
 ## Block I in detail
