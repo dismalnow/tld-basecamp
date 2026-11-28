@@ -108,6 +108,11 @@ Decide how the change will be proven before you write it. Put the evidence in th
 - Pull request text has four parts: What, Why, Evidence, Limits.
 - Squash merge once the tests pass, and only when the owner has said that the agent may
   merge. No force pushes, and no rewritten history on `master`.
+- Git operations belong to Claude. Claude commits, pushes, opens and merges pull requests,
+  and is the only agent that asks the owner to run a git command. Codex may recommend a git
+  operation in its report. It does not run one that changes the repository, and it does not
+  ask the owner to run one. Codex keeps its own files in `codex-work/` and `.codex/`, which
+  git ignores.
 
 ## Stop and ask the owner first
 
