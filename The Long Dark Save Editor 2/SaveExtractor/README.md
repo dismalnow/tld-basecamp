@@ -9,7 +9,8 @@ game's own files needs `UnityPy`.
 | File | What it does |
 |---|---|
 | `tld_save_reader.py` | Lists every item in a save, as a summary or a CSV |
-| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, how it decompresses, the weight, liters and calories it reads, and the item names it shows |
+| `tld_units.py` | Converts the weights and volumes in the listings to pounds and US gallons |
+| `test_tld_save_reader.py` | Tests for `tld_save_reader.py`: where it writes its CSV, its region labels, how it decompresses, the weight, liters and calories it reads, the pounds and US gallons it makes of them, and the item names it shows |
 | `tld_taxonomy.py` | The item table: category for each `GEAR_` prefab, where the prefab comes from, and the game's display name where a source states it |
 | `test_tld_taxonomy.py` | Tests for the display names in `tld_taxonomy.py` |
 | `tld_prefab_diff.py` | Checks the item table against saves and the game's own item catalogs |
@@ -64,10 +65,33 @@ is a spoiler, so it is off by default.
 | `unit_weight_kg` | Weight of one unit in kilograms, as the save stores it. For a stack, multiply by `count`. Blank when the save stores no weight: water, other liquids, powders, papers and keys |
 | `liters` | Liquid the item holds, in liters: the water you carry, a bottle or can, or the fuel in a lamp. Blank when the item holds none, or the game has not set the amount yet |
 | `calories` | Calories left in one unit of a food item |
+| `unit_weight_lb` | Weight of one unit in pounds. Blank when `unit_weight_kg` is blank |
+| `gallons` | Liquid the item holds in US gallons. Blank when `liters` is blank |
 
 `unit_weight_kg` is the weight of a whole unit. The game keeps the same number for a food item
 that is half eaten, and it does not include the liquid inside a container. So the sum of
 these weights is not the carried weight that the game shows.
+
+### US units in the listings
+
+One US gallon is exactly 3.785411784 liters. One pound is exactly 0.45359237 kilograms.
+The listings convert the stored amount and cut off after two decimal places. The CSV rounds
+kilograms and liters to three decimals independently, so converting the displayed metric value
+can give a different last digit.
+
+These readings were taken in the game on 2026-11-27. The comparison uses one kilogram per
+liter for the water weights. The CSV reports pounds only when the item has a stored weight.
+
+| In the save | Exact conversion (shown to five decimals) | The game showed |
+|---|---|---|
+| 1.087399904 liters | 0.28726 gal | 0.28 gal |
+| 3.590625696 liters | 0.94854 gal, 7.91597 lb | 0.94 gal, 7.91 lb |
+| 2.5 liters | 0.66043 gal, 5.51156 lb | 0.66 gal, 5.51 lb |
+| An item of 0.03 kilograms | 0.06614 lb | 0.06 lb |
+| 2.2758 liters | 5.01728 lb | 5.02 lb |
+
+Four readings agree with cutting off. For 2.2758 liters the rule gives 5.01 lb, and the
+game showed 5.02 lb.
 
 ## Check that a save can be rebuilt exactly
 
@@ -187,15 +211,15 @@ python tld_save_edit.py liquids $save
 python tld_save_edit.py set-liters $save --item GEAR_WaterSupplyPotable --liters 2.5 --out "$env:TEMP\sandbox15.edited"
 ```
 
-`liquids` lists the inventory items that hold liquid: the water you carry, bottles and
-cans, and the fuel in a lamp. An amount shown as `not set` is one the game has not filled
-in yet. The amount is in liters, from 0 to 999, with up to nine decimal places. When the
+`liquids` shows liters and US gallons for the water you carry, bottles and cans, and the
+fuel in a lamp. When the game has yet to set an amount, liters reads `not set` and gallons
+is blank. `set-liters` takes liters from 0 to 999, with up to nine decimal places. When the
 inventory holds more than one of an item, add `--entry` with the number from that list.
 
 ```text
-entry  item                     liters
-    1  GEAR_WaterSupplyPotable  2
-  180  GEAR_LampFuel            0.11630746
+entry  item                     liters      gallons
+    1  GEAR_WaterSupplyPotable  2           0.52
+  180  GEAR_LampFuel            0.11630746  0.03
 2 items that hold liquid among 443 inventory items in sandbox15.
 ```
 
