@@ -11,8 +11,8 @@ Usage:
 --out FILE writes the CSV to FILE.
 
 Item categories, display names and the source column (base game, DLC, mod) come
-from tld_taxonomy.py. Decompression comes from tld_save_codec.py. Both must sit
-next to this file.
+from tld_taxonomy.py. Keep it, tld_save_codec.py (decompression), and tld_units.py
+(US units) next to this file.
 The save file is only read, never written.
 """
 
@@ -25,11 +25,13 @@ import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from tld_save_codec import lzf_decompress
 from tld_taxonomy import TAXONOMY_LOOKUP, display_name, normalize_prefab, prefab_source
+from tld_units import KG_PER_POUND, LITERS_PER_US_GALLON, us_amount
 
 
 # ---------------------------------------------------------------------------
@@ -488,8 +490,14 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _unit_weight_kg(gear: dict) -> Optional[float]:
-    """Weight of one unit in kilograms, as the save stores it. None when no weight is stored.
+def _listed_amount(stored: Union[int, float], metric_per_unit: Decimal) -> tuple[float, Optional[Decimal]]:
+    metric = round(stored / _BILLION, 3)
+    raw = Decimal(repr(stored))
+    return metric, us_amount(raw, metric_per_unit, _BILLION) if raw.is_finite() else None
+
+
+def _unit_weight(gear: dict) -> tuple[Optional[float], Optional[Decimal]]:
+    """Weight of one unit in kilograms and pounds. Both are absent when the save stores no weight.
 
     It is the weight of a whole unit: the game keeps the same number for a food item that is
     half eaten. Water, other liquids, powders, papers and keys have no stored weight. The C#
@@ -498,12 +506,12 @@ def _unit_weight_kg(gear: dict) -> Optional[float]:
     """
     value = gear.get("m_WeightKG")
     if not _is_number(value) or value <= 0:
-        return None
-    return round(value / _BILLION, 3)
+        return None, None
+    return _listed_amount(value, KG_PER_POUND)
 
 
-def _liters(gear: dict) -> Optional[float]:
-    """Liquid the item holds, in liters. None when it holds none, or the save stores no amount.
+def _liquid_volume(gear: dict) -> tuple[Optional[float], Optional[Decimal]]:
+    """Liquid the item holds in liters and US gallons. Both are absent when there is no stored amount.
 
     A negative number is the game's mark for an amount it has not set yet.
     """
@@ -511,8 +519,8 @@ def _liters(gear: dict) -> Optional[float]:
         record = _json_value(gear.get(holder))
         value = record.get(field) if isinstance(record, dict) else None
         if _is_number(value):
-            return round(value / _BILLION, 3) if value >= 0 else None
-    return None
+            return _listed_amount(value, LITERS_PER_US_GALLON) if value >= 0 else (None, None)
+    return None, None
 
 
 def _calories(gear: dict) -> Optional[float]:
@@ -563,6 +571,8 @@ class ItemRecord:
     unit_weight_kg: Optional[float]   # stored weight of one whole unit, None when the save has none
     liters: Optional[float]           # liquid the item holds: water, a bottle or can, lamp fuel
     calories: Optional[float]         # calories left in one unit of food
+    unit_weight_lb: Optional[Decimal] = None
+    gallons: Optional[Decimal] = None
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +587,8 @@ def _make_record(scene: str, region: str, location: str, location_type: str,
                  x: Optional[float], y: Optional[float], z: Optional[float]) -> "ItemRecord":
     prefab = normalize_prefab(raw_prefab)
     category, subcategory, _leaf = TAXONOMY_LOOKUP.get(prefab, ("Unknown", "", ""))
+    kg, lb = _unit_weight(gear)
+    liters, gallons = _liquid_volume(gear)
     return ItemRecord(
         scene=scene,
         region=region,
@@ -591,9 +603,11 @@ def _make_record(scene: str, region: str, location: str, location_type: str,
         count=_count(gear),
         condition_pct=_condition(gear),
         x=x, y=y, z=z,
-        unit_weight_kg=_unit_weight_kg(gear),
-        liters=_liters(gear),
+        unit_weight_kg=kg,
+        liters=liters,
         calories=_calories(gear),
+        unit_weight_lb=lb,
+        gallons=gallons,
     )
 
 
@@ -727,14 +741,15 @@ def load_save(path: Path) -> list:
 # Output
 # ---------------------------------------------------------------------------
 
-HEADERS = ["region", "location", "location_type", "container",
-           "category", "subcategory", "item",
-           "count", "condition_pct", "x", "y", "z", "prefab", "source",
-           "unit_weight_kg", "liters", "calories"]
+TABLE_HEADERS = ["region", "location", "location_type", "container",
+                 "category", "subcategory", "item",
+                 "count", "condition_pct", "x", "y", "z", "prefab", "source",
+                 "unit_weight_kg", "liters", "calories"]
+HEADERS = TABLE_HEADERS + ["unit_weight_lb", "gallons"]
 
 
 def print_table(records: list) -> None:
-    widths = {h: len(h) for h in HEADERS}
+    widths = {h: len(h) for h in TABLE_HEADERS}
     rows = []
     for r in records:
         row = [
@@ -751,15 +766,15 @@ def print_table(records: list) -> None:
             str(r.calories) if r.calories is not None else "",
         ]
         rows.append(row)
-        for h, v in zip(HEADERS, row):
+        for h, v in zip(TABLE_HEADERS, row):
             widths[h] = max(widths[h], len(v))
 
     sep = "  "
-    header_line = sep.join(h.ljust(widths[h]) for h in HEADERS)
+    header_line = sep.join(h.ljust(widths[h]) for h in TABLE_HEADERS)
     print(header_line)
     print("-" * len(header_line))
     for row in rows:
-        print(sep.join(v.ljust(widths[h]) for h, v in zip(HEADERS, row)))
+        print(sep.join(v.ljust(widths[h]) for h, v in zip(TABLE_HEADERS, row)))
 
 
 DEFAULT_REPORT_FOLDER = "TLD-save-reports"
@@ -792,6 +807,7 @@ def write_csv(records: list, path: Path) -> None:
                 r.unit_weight_kg if r.unit_weight_kg is not None else "",
                 r.liters if r.liters is not None else "",
                 r.calories if r.calories is not None else "",
+                r.unit_weight_lb, r.gallons,
             ])
     print(f"Wrote {len(records)} rows to {path}")
 

@@ -100,6 +100,7 @@ from typing import Dict, FrozenSet, Iterator, List, Optional, Sequence, Set, Tup
 
 import tld_save_codec as codec
 from tld_save_codec import DecodedSave, JsonValue, NestedJson, Number
+from tld_units import LITERS_PER_US_GALLON, us_amount
 
 MAX_COUNT = 9999
 MIN_CONDITION = 1.0      # percent
@@ -2267,9 +2268,12 @@ def _run_liquids(path: Path) -> int:
         print(f"Refused: {error}", file=sys.stderr)
         return 1
     width = max([len(row.prefab) for row in listed] + [4])
-    print(f"{'entry':>5}  {'item':<{width}}  liters")
+    liters_width = max([len(_liters_text(row.liters)) for row in listed] + [len("liters")])
+    print(f"{'entry':>5}  {'item':<{width}}  {'liters':<{liters_width}}  gallons")
     for row in listed:
-        print(f"{row.entry:>5}  {row.prefab:<{width}}  {_liters_text(row.liters)}")
+        liters = _liters_text(row.liters)
+        gallons = "" if row.liters is None else str(us_amount(row.liters, LITERS_PER_US_GALLON))
+        print(f"{row.entry:>5}  {row.prefab:<{width}}  {liters:<{liters_width}}  {gallons}".rstrip())
     print(f"{len(listed)} items that hold liquid among {total} inventory items in {path.name}.")
     return 0
 

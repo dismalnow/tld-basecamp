@@ -3792,16 +3792,16 @@ class CommandTests(unittest.TestCase):
         self.assertFalse(self.out.exists())
 
     def test_liquids_lists_the_items_that_hold_liquid(self) -> None:
-        self.save.write_bytes(liquids_save())
+        self.save.write_bytes(liquids_save(lamp_amount="1"))
         code, out, err = self.run_command("liquids", str(self.save))
         self.assertEqual(code, 0)
         lines = out.splitlines()
-        self.assertEqual(lines[0].split(), ["entry", "item", "liters"])
+        self.assertEqual(lines[0].split(), ["entry", "item", "liters", "gallons"])
         self.assertEqual([line.split() for line in lines[1:6]], [
-            ["0", "GEAR_WaterSupplyPotable", "1.9048"],
-            ["2", "GEAR_LampFuel", "0.171669576"],
-            ["3", "GEAR_LampFuel", "0.5"],
-            ["4", "GEAR_KeroseneLampB", "1"],
+            ["0", "GEAR_WaterSupplyPotable", "1.9048", "0.50"],
+            ["2", "GEAR_LampFuel", "0.171669576", "0.04"],
+            ["3", "GEAR_LampFuel", "0.5", "0.13"],
+            ["4", "GEAR_KeroseneLampB", "0.000000001", "0.00"],
             ["5", "GEAR_BottleHydrogenPeroxide", "not", "set"],
         ])
         self.assertEqual(lines[6], "5 items that hold liquid among 10 inventory items in sandbox15.")

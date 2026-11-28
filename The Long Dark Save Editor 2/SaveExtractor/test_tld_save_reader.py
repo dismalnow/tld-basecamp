@@ -23,6 +23,7 @@ import os
 import tempfile
 import unittest
 from collections import Counter
+from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest import mock
@@ -106,6 +107,11 @@ SUPPLIES: List[Tuple[str, Dict[str, JsonValue], Optional[float], Optional[float]
                                       "m_KeroseneLampItemSerialized": NestedJson(
                                           {"m_CurrentFuelLitersProxy": Number("-2.14748365E+14")})},
      1.0, None, None),
+    # Both rows round to the same metric amounts. The second is exactly 0.29 in each US unit.
+    ("GEAR_LampFuel", {"m_WeightKG": Number("131541787"), "m_LiquidItemSerialized": NestedJson(
+        {"m_LiquidLitersProxy": Number("1097769417")})}, 0.132, 1.098, None),
+    ("GEAR_LampFuel", {"m_WeightKG": Number("131541787.3"), "m_LiquidItemSerialized": NestedJson(
+        {"m_LiquidLitersProxy": Number("1097769417.36")})}, 0.132, 1.098, None),
 ]
 
 
@@ -547,6 +553,31 @@ class DamagedSaveTests(ReaderCase):
         self.assertIn("could not decode scene 'PostOfficeA'", errors.getvalue())
 
 
+class UsUnitTests(unittest.TestCase):
+    def water(self, billionths: int) -> reader.ItemRecord:
+        """Use the same stored number for liters and kilograms to check the game readings for water."""
+        gear = {"m_WeightKG": billionths, "m_WaterSupplySerialized": {"m_VolumeProxy": billionths}}
+        item = {"m_PrefabName": "GEAR_WaterSupplyPotable", "m_SerializedGear": gear}
+        return reader.extract_player_inventory({"m_Inventory_Serialized": {"m_SerializedItems": [item]}})[0]
+
+    def test_1_087399904_liters(self) -> None:
+        self.assertEqual(str(self.water(1_087_399_904).gallons), "0.28")
+
+    def test_3_590625696_liters(self) -> None:
+        row = self.water(3_590_625_696)
+        self.assertEqual((str(row.gallons), str(row.unit_weight_lb)), ("0.94", "7.91"))
+
+    def test_2_5_liters(self) -> None:
+        row = self.water(2_500_000_000)
+        self.assertEqual((str(row.gallons), str(row.unit_weight_lb)), ("0.66", "5.51"))
+
+    def test_0_03_kilograms(self) -> None:
+        self.assertEqual(str(self.water(30_000_000).unit_weight_lb), "0.06")
+
+    def test_2_2758_liters_cuts_off_even_though_the_game_showed_5_02_pounds(self) -> None:
+        self.assertEqual(str(self.water(2_275_800_000).unit_weight_lb), "5.01")
+
+
 class StoredAmountTests(ReaderCase):
     """unit_weight_kg, liters and calories, as the save stores them."""
 
@@ -579,21 +610,32 @@ class StoredAmountTests(ReaderCase):
         self.assertEqual([(record.prefab, record.unit_weight_kg, record.liters, record.calories)
                           for record in waiting], [("GEAR_Stick", None, None, None)])
 
-    def test_the_csv_ends_with_the_three_columns(self) -> None:
+    def test_the_csv_ends_with_calories_pounds_and_gallons(self) -> None:
         code, _, _ = self.run_reader(str(self.save), "--csv")
         self.assertEqual(code, 0)
         rows = rows_of(self.reports / "sandbox15.csv")
         self.assertEqual(rows[0], reader.HEADERS)
-        self.assertEqual(rows[0][-3:], ["unit_weight_kg", "liters", "calories"])
+        self.assertEqual(rows[0][-5:], ["unit_weight_kg", "liters", "calories", "unit_weight_lb", "gallons"])
         count = reader.HEADERS.index("count")
-        self.assertEqual((rows[1][count], rows[1][-3:]), ("6", ["0.15", "", ""]))               # the sticks
-        self.assertEqual(rows[2][-3:], ["0.5", "", "122.2"])                                    # the MRE
-        self.assertEqual(rows[4][-3:], ["", "2.0", ""])                                         # the water
+        self.assertEqual((rows[1][count], rows[1][-5:]), ("6", ["0.15", "", "", "0.33", ""]))  # sticks
+        self.assertEqual(rows[2][-5:], ["0.5", "", "122.2", "1.10", ""])                        # MRE
+        self.assertEqual(rows[4][-5:], ["", "2.0", "", "", "0.52"])                             # water
+        self.assertEqual(rows[6][-5:], ["1.0", "0.396", "", "2.20", "0.10"])                   # lamp
+        self.assertEqual(rows[8][-5:], ["", "", "", "", ""])                                   # unset bottle
+
+    def test_csv_uses_stored_amounts_on_both_sides_of_a_cutoff(self) -> None:
+        code, _, err = self.run_reader(str(self.save), "--csv")
+        self.assertEqual(code, 0, err)
+        rows = rows_of(self.reports / "sandbox15.csv")
+        fuel = [row[-5:] for row in rows[1:] if row[rows[0].index("prefab")] == "GEAR_LampFuel"]
+        self.assertEqual(fuel, [["0.132", "1.098", "", "0.28", "0.28"],
+                                ["0.132", "1.098", "", "0.29", "0.29"]])
 
     def test_the_columns_that_were_there_keep_their_places(self) -> None:
-        self.assertEqual(reader.HEADERS[:14], [
+        self.assertEqual(reader.HEADERS[:-2], [
             "region", "location", "location_type", "container", "category", "subcategory", "item",
-            "count", "condition_pct", "x", "y", "z", "prefab", "source"])
+            "count", "condition_pct", "x", "y", "z", "prefab", "source",
+            "unit_weight_kg", "liters", "calories"])
 
 
 class ItemNameTests(ReaderCase):
@@ -728,6 +770,40 @@ def amounts_from_the_codec(save: Path) -> Iterator[Amounts]:
 
 @unittest.skipUnless(real_saves(), "set TLD_SAVE_DIR to the folder that holds your saves")
 class RealSaveTests(ReaderCase):
+    def test_csv_us_values_are_within_one_hundredth_of_the_stored_amounts(self) -> None:
+        for save in real_saves():
+            with self.subTest(save=save.name):
+                output = self.root / "amounts.csv"
+                # Keep the raw gear for each emitted row, including scripted and unsearched items.
+                with mock.patch.object(reader, "_make_record", wraps=reader._make_record) as made:
+                    code, _, err = self.run_reader(str(save), "--include-unsearched", "--out", str(output))
+                self.assertEqual(code, 0, err)
+                with output.open(newline="", encoding="utf-8") as handle:
+                    exported = csv.DictReader(handle)
+                    self.assertEqual((exported.fieldnames or [])[-2:], ["unit_weight_lb", "gallons"])
+                    rows = list(exported)
+                self.assertEqual(len(rows), made.call_count)
+                for row, call in zip(rows, made.call_args_list):
+                    prefab, gear = call.args[5:7]
+                    self.assertEqual(row["prefab"], reader.normalize_prefab(prefab))
+                    volume = None
+                    for holder, field in reader._LIQUID_FIELDS:
+                        record = reader._json_value(gear.get(holder))
+                        if isinstance(record, dict) and reader._is_number(record.get(field)):
+                            volume = record[field]
+                            break
+                    for metric, us, stored, factor in (
+                            ("unit_weight_kg", "unit_weight_lb", gear.get("m_WeightKG"), "0.45359237"),
+                            ("liters", "gallons", volume, "3.785411784")):
+                        with self.subTest(prefab=prefab, column=us):
+                            if row[metric] == "":
+                                self.assertEqual(row[us], "")
+                            else:
+                                exact = Decimal(repr(stored)) / 1_000_000_000 / Decimal(factor)
+                                difference = exact - Decimal(row[us])
+                                self.assertGreaterEqual(difference, 0)
+                                self.assertLess(difference, Decimal("0.01"))
+
     def test_csv_of_every_real_save_goes_to_the_reports_folder(self) -> None:
         folder = Path(os.environ["TLD_SAVE_DIR"])
         before = sorted(path.name for path in folder.iterdir())
