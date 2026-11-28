@@ -96,6 +96,12 @@ def condition_path(entry: int) -> str:
             "m_NormalizedCondition")
 
 
+def burned_message(entry: int, prefab: str) -> str:
+    return (f"inventory entry {entry} ({prefab}) is a torch or a flare that has burned. "
+            "The save keeps its burn time next to its condition, so this tool leaves it alone, "
+            "as repair-all does")
+
+
 def doctored_save(change) -> bytes:
     """The default save after change(list of inventory items) has altered it."""
     save = codec.decode_save(build_save())
@@ -1415,7 +1421,7 @@ class RepairTests(unittest.TestCase):
         self.assertEqual((result.entries, result.unchanged_entries), (3, 2))
         self.assertTrue(codec.verify_save(result.data).identical)
 
-    def test_it_repairs_what_set_condition_accepts_apart_from_burned_torches_and_flares(self) -> None:
+    def test_it_repairs_every_entry_that_set_condition_can_set_to_full(self) -> None:
         original = repair_save()
         repaired = {entry for entry, _, _ in edit.repair_inventory(original).repaired}
         for entry, one in enumerate(edit._inventory_items(codec.decode_save(original))):
@@ -1425,11 +1431,12 @@ class RepairTests(unittest.TestCase):
                     self.assertNotIn(entry, repaired)
                     continue
                 try:
-                    edit.set_item_condition(original, prefab, 100, entry=entry)
-                    accepted = True
+                    result = edit.set_item_condition(original, prefab, 100, entry=entry)
                 except EditError:
-                    accepted = False
-                self.assertEqual(entry in repaired, accepted and entry not in (17, 20, 21, 23))
+                    self.assertNotIn(entry, repaired)
+                else:
+                    self.assertIn(entry, repaired)
+                    self.assertEqual(result.data, repair_save(repaired=(entry,)))
 
     def test_a_stack_keeps_its_count(self) -> None:
         result = edit.repair_inventory(repair_save())
@@ -3678,6 +3685,23 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(out, "")
                 self.assertEqual(self.snapshot(), before)
 
+    def test_set_condition_refuses_burned_lights_and_requires_an_entry_for_several_torches(self) -> None:
+        self.save.write_bytes(repair_save())
+        ambiguous = ("the inventory holds 6 entries of GEAR_Torch: entry 17 (condition 40.5%), "
+                     "entry 18 (condition 80.0%), entry 21 (condition 50.0%), entry 22 (condition 60.0%), "
+                     "entry 23 (condition 30.0%), entry 24 (condition 100.0%). Add --entry to say which one")
+        for entry, prefab in ((17, "GEAR_Torch"), (20, "GEAR_BlueFlare"), (21, "GEAR_Torch"),
+                              (23, "GEAR_Torch"), (24, "GEAR_Torch"), (None, "GEAR_Torch")):
+            with self.subTest(prefab=prefab, entry=entry):
+                options = ["--entry", str(entry)] if entry is not None else []
+                message = burned_message(entry, prefab) if entry is not None else ambiguous
+                before = self.snapshot()
+                out_path = self.folder / f"torch-{entry}.edited"
+                code, out, err = self.run_command("set-condition", str(self.save), "--item", prefab, *options,
+                                                  "--condition", "100", "--out", str(out_path))
+                self.assertEqual((code, out, err), (1, "", f"Refused: {message}\nNothing was written.\n"))
+                self.assertEqual(self.snapshot(), before)
+
     def test_set_count_writes_the_edited_save_to_a_new_file(self) -> None:
         before = self.snapshot()
         code, out, err = self.run_command("set-count", str(self.save), "--item", "GEAR_WoodMatches",
@@ -4910,6 +4934,25 @@ class CommandTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("TLD_SAVE_DIR"),
                      "set TLD_SAVE_DIR to a folder of real saves to run this")
 class RealSaveTests(unittest.TestCase):
+    def test_set_condition_refuses_every_burned_torch_or_flare(self) -> None:
+        checked = 0
+        for path in codec.find_saves(Path(os.environ["TLD_SAVE_DIR"])):
+            original = path.read_bytes()
+            save = codec.decode_save(original)
+            items = edit._inventory_items(save)
+            for one in edit.list_items(save):
+                gear = edit._gear_of(items[one.entry])
+                if gear is None or not edit._has_burned(gear):
+                    continue
+                checked += 1
+                with self.subTest(save=path.name, entry=one.entry, prefab=one.prefab):
+                    percent = 50 if one.condition == 100 else 100
+                    with self.assertRaises(EditError) as caught:
+                        edit.set_item_condition(original, one.prefab, percent, entry=one.entry)
+                    self.assertEqual(str(caught.exception), burned_message(one.entry, one.prefab))
+        if not checked:
+            self.skipTest("no real save holds a burned torch or flare in the inventory")
+
     def test_one_count_can_be_changed_in_every_real_save(self) -> None:
         """In memory only. No file is written."""
         folder = Path(os.environ["TLD_SAVE_DIR"])
@@ -4939,8 +4982,11 @@ class RealSaveTests(unittest.TestCase):
         for path in saves:
             with self.subTest(save=path.name):
                 original = path.read_bytes()
-                before = edit.list_items(codec.decode_save(original))
-                target = next((item for item in before if item.condition and item.condition != 50.0), None)
+                save = codec.decode_save(original)
+                before = edit.list_items(save)
+                items = edit._inventory_items(save)
+                target = next((item for item in before if item.condition and item.condition != 50.0
+                               and not edit._has_burned(edit._gear_of(items[item.entry]) or {})), None)
                 if target is None:
                     continue
                 result = edit.set_item_condition(original, target.prefab, 50, entry=target.entry)

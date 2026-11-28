@@ -31,8 +31,9 @@ items lists everything in the player's inventory: entry number, item, count, con
 stacks lists only the stacks, liquids only the items that hold liquid, foods only the
 items with calories, and weapons only the items that can hold rounds. set-count changes
 the count of one stack. set-condition changes the condition of one item, or of one whole
-stack. set-liters changes the liquid one item holds: the water you carry, a bottle or
-can, or the fuel in a lamp. set-calories changes the calories left in one food item.
+stack. It refuses a torch or a flare that has burned. set-liters changes the liquid one
+item holds: the water you carry, a bottle or can, or the fuel in a lamp. set-calories
+changes the calories left in one food item.
 set-rounds changes the rounds loaded in one rifle, revolver or distress pistol. Add
 --entry when the inventory holds more than one of that item. repair-all sets the
 condition of every item in the inventory to 100%, except ruined items and torches and
@@ -870,7 +871,8 @@ def set_item_condition(original: bytes, prefab: str, percent: float,
     """Return the save with the condition of one inventory entry changed. Reads and writes no file.
 
     The condition is given in percent. For a stack it applies to the whole stack. Raises
-    EditError under the same rules as set_stack_count, and when the item is ruined.
+    EditError under the same rules as set_stack_count, when the item is ruined, or when it
+    is a torch or a flare that has burned.
     """
     if not MIN_CONDITION <= percent <= MAX_CONDITION:
         raise EditError(f"the condition must be a number from {MIN_CONDITION:g} to {MAX_CONDITION:g} "
@@ -878,6 +880,10 @@ def set_item_condition(original: bytes, prefab: str, percent: float,
     save = _decode_for_edit(original)
     chosen, item = _select_item(_inventory_items(save), prefab, entry)
     gear, old = _editable_condition(item, chosen, prefab)
+    if _has_burned(gear):
+        raise EditError(f"inventory entry {chosen} ({prefab}) is a torch or a flare that has burned. "
+                        "The save keeps its burn time next to its condition, so this tool leaves it alone, "
+                        "as repair-all does")
     new = condition_literal(percent)
     if _as_float32(float(old)) == _as_float32(float(new)):
         raise EditError(f"inventory entry {chosen} ({prefab}) already has a condition of "

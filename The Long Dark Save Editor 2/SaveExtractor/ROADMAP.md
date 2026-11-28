@@ -34,7 +34,7 @@ change finishes or advances an item, update this file in the same pull request.
 | Calories of a food item | Built (pull request 10). Tested in game on 2026-11-27 |
 | Rounds in a weapon | Built (pull request 11). Tested in game on 2026-11-27 |
 | Film in the camera | Decided by the owner on 2026-11-24: treat the camera like a gun, with three numbers: shots left, shots taken, and where the images are. The save keeps them in the camera's own list of rounds, in two photo counters, and in a photo list. All of these were empty in the 14 saves at hand. Since the owner's session of 2026-11-27 one save holds film in the camera and three photos, and the images are in a file of their own next to the save (`photo1`). Not started |
-| Repair everything in the inventory | Built (pull request 12). Tested in game on 2026-11-27. Torches and flares that have burned are left alone |
+| Repair everything in the inventory | Built (pull request 12). Tested in game on 2026-11-27. Torches and flares that have burned are left alone, and since pull request 36 `set-condition` refuses them too |
 | Remove an item | Built (pull request 13). Tested in game on 2026-11-27 |
 | Add an item | First step built (pull request 14): `copy-item` adds another one of an item the inventory holds. Tested in game on 2026-11-27: the game showed both, and one could be dropped while the other stayed. An item the inventory does not hold is not started: it needs a record built for each kind of item |
 | Several edits put in place at once | Built (pull request 15): `apply` lists the inventory entries that an edited file adds or takes away, and every other value under its entry number in the live save. Before that, a file with an entry more or less was shown as one changed value, or as hundreds |

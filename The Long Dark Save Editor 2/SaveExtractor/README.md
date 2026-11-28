@@ -170,6 +170,8 @@ sandbox15 itself was not changed.
 ```
 
 A ruined item (condition 0) is refused: the game keeps more than the condition for it.
+`set-condition` also refuses a torch or a flare that has burned. The save keeps its burn
+time next to its condition, and changing the condition alone would leave the old burn time.
 
 ### Liters
 
@@ -363,9 +365,9 @@ Things to know about `repair-all`:
 - A torch or a flare that has burned is left alone too. The save keeps its burn time next to
   its condition, and in both burned torches in the real saves the condition is exactly what
   is left of 90 minutes: a torch that burned 53.6 minutes is at 40.5%. What the game makes of
-  a full condition next to that burn time is not known. `set-condition` still changes such a
-  torch when you name it, and that is not tested in the game. The C# editor's repair
-  sets every item to 100% and marks torches and flares as fresh.
+  a full condition next to that burn time is not known. The C# editor's repair sets every item
+  to 100% and marks torches and flares as fresh. `repair-all` skips a torch or a flare that
+  has burned, and `set-condition` refuses it.
 - Hit points are left alone, as with `set-condition`. The game works them out again from the
   condition when it loads the save.
 - In 14 real saves the inventories hold 1,143 items: 657 at 100%, 484 that a repair changes,
